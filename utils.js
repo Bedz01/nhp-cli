@@ -1,6 +1,9 @@
 import { green, yellow, red, cyan, bold, dim, blue, magenta, stripColor } from "https://deno.land/std@0.224.0/fmt/colors.ts";
 import { readTextFile, getEnv } from "./fs_adapter.js";
 
+// Set to null to disable sell price calculation, or a number like 1.25 for a 25% margin.
+export const SELL_MARGIN_MULTIPLIER = null;
+
 export async function loadCredentials() {
   try {
     const text = await readTextFile("credentials.json");
@@ -90,9 +93,13 @@ export function printPricing(results, originalRequests = [], origConsoleLog = co
     origConsoleLog(`   ${bold("Desc:")} ${prod.Description || prod.DisplayName}`);
     
     const buyPrice = prod.AdjustedPriceWithCurrency || `$${prod.NetPrice}`;
-    const sellPriceNum = parseFloat((buyPrice).replace(/[^0-9.]/g, '')) * 1.25;
     origConsoleLog(`   ${bold("Buy:")}  ${green(buyPrice)}`);
-    origConsoleLog(`   ${bold("Sell:")} ${yellow(`$${sellPriceNum.toFixed(2)}`)}`);
+    
+    if (SELL_MARGIN_MULTIPLIER !== null) {
+      const sellPriceNum = parseFloat((buyPrice).replace(/[^0-9.]/g, '')) * SELL_MARGIN_MULTIPLIER;
+      origConsoleLog(`   ${bold("Sell:")} ${yellow(`$${sellPriceNum.toFixed(2)}`)}`);
+    }
+
     if (prod.Discount) origConsoleLog(`   ${bold("Disc:")} ${magenta(prod.Discount)}`);
     
     const nzColor = nzStock > 0 ? green : red;
