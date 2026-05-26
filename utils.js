@@ -2,7 +2,23 @@ import { green, yellow, red, cyan, bold, dim, blue, magenta, stripColor } from "
 import { readTextFile, getEnv } from "./fs_adapter.js";
 
 // Set to null to disable sell price calculation, or a number like 1.25 for a 25% margin.
-export const SELL_MARGIN_MULTIPLIER = null;
+export let SELL_MARGIN_MULTIPLIER = null;
+
+export async function loadConfig() {
+  try {
+    const text = await readTextFile("credentials.json");
+    const json = JSON.parse(text);
+    if (json.sellMarginMultiplier !== undefined) {
+      SELL_MARGIN_MULTIPLIER = json.sellMarginMultiplier;
+    }
+  } catch (err) {
+    // Ignore if not present
+  }
+  const marginEnv = getEnv("NHP_SELL_MARGIN");
+  if (marginEnv !== undefined && marginEnv !== null) {
+    SELL_MARGIN_MULTIPLIER = parseFloat(marginEnv);
+  }
+}
 
 export async function loadCredentials() {
   try {

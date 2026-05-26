@@ -1,7 +1,8 @@
 import { NHPClient } from "./api.js";
-import { parseCsv, printProducts, printPricing, printOrders, printOrderDetails, printInvoices, printInvoiceDetails } from "./utils.js";
+import { parseCsv, printProducts, printPricing, printOrders, printOrderDetails, printInvoices, printInvoiceDetails, loadConfig } from "./utils.js";
 
 if (import.meta.main) {
+  await loadConfig();
   let args = [];
   const options = {};
   let isJsonMode = false;

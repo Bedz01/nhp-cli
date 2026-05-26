@@ -25,15 +25,18 @@ directory:
 ```json
 {
   "username": "your_email@example.com",
-  "password": "your_password"
+  "password": "your_password",
+  "sellMarginMultiplier": 1.25
 }
 ```
+*(Note: `sellMarginMultiplier` is optional. If provided, the CLI will calculate and display a sell price for products).*
 
 **Option 2: Environment Variables** Alternatively, you can export the following
 environment variables:
 
 - `NHP_USERNAME`
 - `NHP_PASSWORD`
+- `NHP_SELL_MARGIN` *(optional)*
 
 Once configured, the CLI will automatically log in on its first run and cache
 your session in `cookies.json`.
