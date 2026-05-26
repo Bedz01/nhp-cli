@@ -1,8 +1,8 @@
 {
+  "name": "nhp-cli",
+  "version": "1.0.0",
+  "exports": "./mod.js",
   "tasks": {
-    "dev": "deno run --watch main.ts"
-  },
-  "imports": {
-    "@std/assert": "jsr:@std/assert@1"
+    "cli": "deno run -A nhp_cli.js"
   }
 }
