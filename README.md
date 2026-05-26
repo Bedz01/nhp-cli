@@ -11,7 +11,32 @@ pull order/invoice history.
 
 ## CLI Usage
 
-The CLI tool is powered by Deno. You can run it directly using `nhp_cli.js`.
+The CLI tool is powered by Deno. You can run it directly using `nhp_cli.js` (or
+via `deno task cli`).
+
+### Setup
+
+Before running the CLI, you must configure your NHP login details. You can do
+this in one of two ways:
+
+**Option 1: credentials.json** Create a `credentials.json` file in the root
+directory:
+
+```json
+{
+  "username": "your_email@example.com",
+  "password": "your_password"
+}
+```
+
+**Option 2: Environment Variables** Alternatively, you can export the following
+environment variables:
+
+- `NHP_USERNAME`
+- `NHP_PASSWORD`
+
+Once configured, the CLI will automatically log in on its first run and cache
+your session in `cookies.json`.
 
 ### Commands
 
