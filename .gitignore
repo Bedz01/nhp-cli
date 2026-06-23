@@ -1,3 +1,6 @@
-credentials.json
 cookies.json
+cookies_test.json
+credentials.json
 .old/
+New folder/
+test_auth.js

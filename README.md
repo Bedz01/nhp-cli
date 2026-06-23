@@ -69,6 +69,15 @@ your session in `cookies.json`.
   invoice.
 - `deno run -A nhp_cli.js po <query>` - Search order history by PO Number.
 
+**Cart Management**
+
+- `deno run -A nhp_cli.js cart add <sku> [qty]` - Add item(s) to cart. Supports bulk adding (`sku1:qty1 sku2:qty2`).
+- `deno run -A nhp_cli.js cart list` - View current items in the cart.
+- `deno run -A nhp_cli.js cart remove <sku_or_lineId>` - Remove an item from the cart.
+- `deno run -A nhp_cli.js cart update <sku_or_lineId> <qty>` - Update quantity of a cart item.
+- `deno run -A nhp_cli.js cart clear` - Empty the entire cart.
+- `deno run -A nhp_cli.js cart upload <csvFilePath>` - Upload a CSV file directly to the cart.
+
 ### JSON Output
 
 You can append `--json` to any command to receive the raw JSON response instead
@@ -192,18 +201,19 @@ const items = await client.getInvoiceDetails("SIN987654321");
 console.log(items);
 ```
 
-## Environment Adapting (Node.js vs Deno)
+#### Cart Management
 
-This library uses a specialized internal `fs_adapter.js` file for all OS-level
-file system and environment variable operations.
+The library provides complete functionality to manage the user's shopping cart:
 
-Currently, the adapter is configured for **Deno**.
+```javascript
+await client.addToCart("115797", 2);
+const cart = await client.getCart();
+await client.updateCartLineQuantity(cart.Lines[0].ExternalCartLineId, 5);
+await client.removeCartLine(cart.Lines[0].ExternalCartLineId);
+await client.clearCart();
 
-If you want to migrate this codebase to **Node.js**:
+// You can also upload CSV files directly to the cart
+await client.uploadCartCsv("./bulk_order.csv");
+```
 
-1. Open `fs_adapter.js`.
-2. Delete the lines reading `Deno.readTextFile` / `Deno.env.get`.
-3. Uncomment the provided Node.js code snippets using `import("fs/promises")`
-   and `process.env`.
-4. Ensure you install a DOM parsing library (like `jsdom` or `cheerio`) to
-   replace the `deno-dom-wasm` import found at the top of `api.js`.
+

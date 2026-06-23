@@ -4,5 +4,10 @@
   "exports": "./mod.js",
   "tasks": {
     "cli": "deno run -A nhp_cli.js"
+  },
+  "lint": {
+    "rules": {
+      "exclude": ["no-import-prefix", "no-external-import", "no-unversioned-import", "no-unused-vars"]
+    }
   }
 }
