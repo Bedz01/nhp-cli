@@ -90,7 +90,7 @@ async function handleOrders(client, offsetStr, options, logger) {
   logger.json(results);
   
   if (!logger.isJson) {
-    printOrders(results?.NhpOrders || [], logger);
+    printOrders(results?.NhpOrders || [], logger, options.brief);
   }
 }
 
@@ -103,7 +103,7 @@ async function handleInvoices(client, offsetStr, options, logger) {
   logger.json(results);
   
   if (!logger.isJson) {
-    printInvoices(results?.NhpInvoices || [], logger);
+    printInvoices(results?.NhpInvoices || [], logger, options.brief);
   }
 }
 
@@ -341,8 +341,8 @@ function showHelp(logger) {
   logger.log(`  deno run -A nhp_cli.js search <query>       - Search for products`);
   logger.log(`  deno run -A nhp_cli.js price <itemId...>    - Get price and stock info for product(s) (qty=1)`);
   logger.log(`  deno run -A nhp_cli.js csv <csvFile>        - Get price and stock for products in a CSV file`);
-  logger.log(`  deno run -A nhp_cli.js orders [offset]      - Get order history. Accepts --dateFrom, --dateTo, --purchaseNumber, etc.`);
-  logger.log(`  deno run -A nhp_cli.js invoices [offset]    - Get invoice history. Accepts --dateFrom, --dateTo, --purchaseNumber, etc.`);
+  logger.log(`  deno run -A nhp_cli.js orders [offset] [--brief] - Get order history. Accepts --dateFrom, --dateTo, --purchaseNumber, etc.`);
+  logger.log(`  deno run -A nhp_cli.js invoices [offset] [--brief] - Get invoice history. Accepts --dateFrom, --dateTo, --purchaseNumber, etc.`);
   logger.log(`  deno run -A nhp_cli.js invoice <id> [--brief] - Get invoice details (items)`);
   logger.log(`  deno run -A nhp_cli.js order <orderId> [--brief]- Get order details (items)`);
   logger.log(`  deno run -A nhp_cli.js po <query>           - Search order details by PO Number`);

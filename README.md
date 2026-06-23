@@ -58,11 +58,11 @@ your session in `cookies.json`.
 
 **Orders & Invoices**
 
-- `deno run -A nhp_cli.js orders [offset]` - Get order history. Optional search
+- `deno run -A nhp_cli.js orders [offset] [--brief]` - Get order history. Optional search
   flags: `--dateFrom`, `--dateTo`, `--purchaseNumber`, `--documentNumber`,
-  `--orderNumber`, `--customerReference`.
-- `deno run -A nhp_cli.js invoices [offset]` - Get invoice history. Accepts the
-  same optional search flags as orders.
+  `--orderNumber`, `--customerReference`. Add `--brief` for a compact table view.
+- `deno run -A nhp_cli.js invoices [offset] [--brief]` - Get invoice history. Accepts the
+  same optional search flags as orders. Add `--brief` for a compact table view.
 - `deno run -A nhp_cli.js order <orderId>` - Get detailed line items and
   shipping status for a specific order.
 - `deno run -A nhp_cli.js invoice <id>` - Get detailed line items for a specific

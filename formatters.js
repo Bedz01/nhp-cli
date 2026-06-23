@@ -56,45 +56,59 @@ function getStatusColor(statusStr) {
   return cyan;
 }
 
-export function printOrders(orders, logger) {
+export function printOrders(orders, logger, brief = false) {
   if (!orders || orders.length === 0) {
     logger.log(yellow(`No orders found.`));
     return;
   }
-  logger.log(`\n${bold(cyan("======================= ORDERS ======================="))}`);
+  if (!brief) logger.log(`\n${bold(cyan("======================= ORDERS ======================="))}`);
   for (const order of orders) {
-    logger.log(` ${bold(blue("•"))} ${bold("Order ID:")} ${cyan(order.OrderId || order.OrderID)}`);
-    logger.log(`   ${bold("PO:")}       ${yellow(order.PurchaseNumber || 'N/A')}`);
-    logger.log(`   ${bold("Date:")}     ${order.OrderDate}`);
-    logger.log(`   ${bold("Total:")}    ${green(order.TotalText || order.Total || '$0.00')}`);
-    
     const status = order.OrderStatus || order.Status || '';
     const statusColor = getStatusColor(status);
-    logger.log(`   ${bold("Status:")}   ${statusColor(status)}`);
-    logger.log(dim(`------------------------------------------------------`));
+    
+    if (brief) {
+      const orderId = padText(cyan(order.OrderId || order.OrderID || ''), 15);
+      const dateStr = padText(order.OrderDate || 'Unknown', 12);
+      const poStr = padText(yellow(order.PurchaseNumber || 'N/A'), 25);
+      logger.log(`${orderId} | ${dateStr} | ${poStr} | ${statusColor(status)}`);
+    } else {
+      logger.log(` ${bold(blue("•"))} ${bold("Order ID:")} ${cyan(order.OrderId || order.OrderID)}`);
+      logger.log(`   ${bold("PO:")}       ${yellow(order.PurchaseNumber || 'N/A')}`);
+      logger.log(`   ${bold("Date:")}     ${order.OrderDate}`);
+      logger.log(`   ${bold("Total:")}    ${green(order.TotalText || order.Total || '$0.00')}`);
+      logger.log(`   ${bold("Status:")}   ${statusColor(status)}`);
+      logger.log(dim(`------------------------------------------------------`));
+    }
   }
 }
 
-export function printInvoices(invoices, logger) {
+export function printInvoices(invoices, logger, brief = false) {
   if (!invoices || invoices.length === 0) {
     logger.log(yellow(`No invoices found.`));
     return;
   }
-  logger.log(`\n${bold(cyan("======================= INVOICES ======================="))}`);
+  if (!brief) logger.log(`\n${bold(cyan("======================= INVOICES ======================="))}`);
   for (const inv of invoices) {
-    logger.log(` ${bold(blue("•"))} ${bold("Invoice No:")} ${cyan(inv.DocumentNumber)}`);
-    logger.log(`   ${bold("PO Number:")}  ${inv.PurchaseNumber || 'N/A'} ${dim(`(${inv.CustomerReference || 'No Ref'})`)}`);
-    logger.log(`   ${bold("Date:")}       ${inv.InvoiceDate || 'Unknown'}`);
-    logger.log(`   ${bold("Total:")}      ${green(inv.TotalText || '$0.00')}`);
-    
-    if (inv.OutstandingText && inv.OutstandingText !== '$0.00') {
-        logger.log(`   ${bold("Outst:")}      ${red(inv.OutstandingText)}`);
-    }
-
     const status = inv.OrderStatus || inv.Status || '';
     const statusColor = getStatusColor(status);
-    logger.log(`   ${bold("Status:")}     ${statusColor(status)}`);
-    logger.log(dim(`------------------------------------------------------`));
+    
+    if (brief) {
+      const invId = padText(cyan(inv.DocumentNumber || ''), 15);
+      const dateStr = padText(inv.InvoiceDate || 'Unknown', 12);
+      const poStr = padText(yellow(inv.PurchaseNumber || 'N/A'), 25);
+      logger.log(`${invId} | ${dateStr} | ${poStr} | ${statusColor(status)}`);
+    } else {
+      logger.log(` ${bold(blue("•"))} ${bold("Invoice No:")} ${cyan(inv.DocumentNumber)}`);
+      logger.log(`   ${bold("PO Number:")}  ${inv.PurchaseNumber || 'N/A'} ${dim(`(${inv.CustomerReference || 'No Ref'})`)}`);
+      logger.log(`   ${bold("Date:")}       ${inv.InvoiceDate || 'Unknown'}`);
+      logger.log(`   ${bold("Total:")}      ${green(inv.TotalText || '$0.00')}`);
+      
+      if (inv.OutstandingText && inv.OutstandingText !== '$0.00') {
+          logger.log(`   ${bold("Outst:")}      ${red(inv.OutstandingText)}`);
+      }
+      logger.log(`   ${bold("Status:")}     ${statusColor(status)}`);
+      logger.log(dim(`------------------------------------------------------`));
+    }
   }
 }
 
