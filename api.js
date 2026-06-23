@@ -38,6 +38,8 @@ export class NHPClient {
     this.userAgent = config.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
     this.logger = config.logger || new Logger({ isJson: config.silent, verbose: false });
     this._isSessionVerified = false;
+    this._authPromise = null;
+    this._cachedToken = null;
   }
 
   async init() {
@@ -65,26 +67,40 @@ export class NHPClient {
   }
 
   async ensureLogin(force = false) {
-    await this.init();
-    if (!force) {
-      if (this._isSessionVerified) return;
-      this.logger.debug(`[Auth] Checking if saved session cookies are valid...`);
-      const isValid = await this.verifySession();
-      if (isValid) {
-        this.logger.debug(`[Auth] Saved session is valid. Reusing cookies.`);
-        this._isSessionVerified = true;
-        return;
-      }
-      this.logger.debug(`[Auth] Saved session is invalid or expired. Performing login...`);
-    } else {
-      this.logger.debug(`[Auth] Force login requested. Logging in...`);
+    if (this._authPromise) {
+      await this._authPromise;
+      return;
     }
 
-    await this.performLogin();
-    this._isSessionVerified = true;
+    this._authPromise = (async () => {
+      await this.init();
+      if (!force) {
+        if (this._isSessionVerified) return;
+        this.logger.debug(`[Auth] Checking if saved session cookies are valid...`);
+        const isValid = await this.verifySession();
+        if (isValid) {
+          this.logger.debug(`[Auth] Saved session is valid. Reusing cookies.`);
+          this._isSessionVerified = true;
+          return;
+        }
+        this.logger.debug(`[Auth] Saved session is invalid or expired. Performing login...`);
+      } else {
+        this.logger.debug(`[Auth] Force login requested. Logging in...`);
+      }
+
+      await this.performLogin();
+      this._isSessionVerified = true;
+    })();
+
+    try {
+      await this._authPromise;
+    } finally {
+      this._authPromise = null;
+    }
   }
 
   async performLogin() {
+    this._cachedToken = null;
     this.jar.cookies.clear();
     const creds = this.credentials || await loadCredentials();
     
@@ -186,6 +202,10 @@ export class NHPClient {
   }
 
   async _getAntiForgeryToken() {
+    if (this._cachedToken) {
+      return this._cachedToken;
+    }
+
     const cookieToken = this.jar.cookies.get("__RequestVerificationToken");
     if (!cookieToken) {
       throw new NHPAPIError("No RequestVerificationToken cookie found.", 401, "");
@@ -212,6 +232,7 @@ export class NHPClient {
     if (!formToken) {
         throw new NHPAPIError("Failed to parse anti-forgery token from response.", tokenResp.status, tokenText);
     }
+    this._cachedToken = formToken;
     return formToken;
   }
 
