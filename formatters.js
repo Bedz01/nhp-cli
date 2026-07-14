@@ -8,7 +8,7 @@ export function printProducts(products, logger) {
   logger.log(`\n${bold(cyan("=================== SEARCH RESULTS ==================="))}`);
   for (const prod of products) {
     logger.log(` ${bold(blue("•"))} ${bold("SKU:")}   ${cyan(prod.sku)}`);
-    logger.log(`   ${bold("Name:")}  ${prod.name || prod.custom_display_name}`);
+    logger.log(`   ${bold("Name:")}  ${prod.name || prod.custom_display_name || 'N/A'}`);
     logger.log(`   ${bold("Brand:")} ${prod.brand || 'N/A'}`);
     logger.log(`   ${bold("URL:")}   ${dim(prod.product_url || 'N/A')}`);
     logger.log(dim(`------------------------------------------------------`));
@@ -25,18 +25,28 @@ export function printPricing(results, originalRequests = [], config = {}, logger
     const orig = originalRequests.find(p => p.itemId.toLowerCase() === prod.ProductId.toLowerCase());
     const requestedQty = orig ? orig.qty : 1;
     
+    if (prod.HasError || prod.ProductExist === false) {
+      logger.log(` ${bold(blue("•"))} ${bold("Item:")} ${cyan(prod.ProductId)} ${dim(`(Req Qty: ${requestedQty})`)}${red(bold(" [ NOT FOUND ]"))}`);
+      const reason = prod.ErrorMessages?.length ? prod.ErrorMessages.join("; ") : "Item not recognised.";
+      logger.log(`   ${red(reason)}`);
+      logger.log(dim(`-------------------------------------------------------`));
+      continue;
+    }
+
     const nzStock = parseInt(prod.OnHandQty, 10) || 0;
     const stockBadge = nzStock > 0 ? green(bold(" [ IN STOCK ]")) : red(bold(" [ OUT OF STOCK ]"));
 
     logger.log(` ${bold(blue("•"))} ${bold("Item:")} ${cyan(prod.ProductId)} ${dim(`(Req Qty: ${requestedQty})`)}${stockBadge}`);
-    logger.log(`   ${bold("Desc:")} ${prod.Description || prod.DisplayName}`);
-    
-    const buyPrice = prod.AdjustedPriceWithCurrency || `$${prod.NetPrice}`;
+    logger.log(`   ${bold("Desc:")} ${prod.Description || prod.DisplayName || 'N/A'}`);
+
+    const buyPrice = prod.AdjustedPriceWithCurrency || (prod.NetPrice != null ? `$${prod.NetPrice}` : 'N/A');
     logger.log(`   ${bold("Buy:")}  ${green(buyPrice)}`);
-    
+
     if (config.sellMarginMultiplier !== null && config.sellMarginMultiplier !== undefined) {
-      const sellPriceNum = parseFloat((buyPrice).replace(/[^0-9.]/g, '')) * config.sellMarginMultiplier;
-      logger.log(`   ${bold("Sell:")} ${yellow(`$${sellPriceNum.toFixed(2)}`)}`);
+      const sellPriceNum = parseFloat(buyPrice.replace(/[^0-9.]/g, '')) * config.sellMarginMultiplier;
+      if (!isNaN(sellPriceNum)) {
+        logger.log(`   ${bold("Sell:")} ${yellow(`$${sellPriceNum.toFixed(2)}`)}`);
+      }
     }
 
     if (prod.Discount) logger.log(`   ${bold("Disc:")} ${magenta(prod.Discount)}`);
@@ -74,7 +84,7 @@ export function printOrders(orders, logger, brief = false) {
     } else {
       logger.log(` ${bold(blue("•"))} ${bold("Order ID:")} ${cyan(order.OrderId || order.OrderID)}`);
       logger.log(`   ${bold("PO:")}       ${yellow(order.PurchaseNumber || 'N/A')}`);
-      logger.log(`   ${bold("Date:")}     ${order.OrderDate}`);
+      logger.log(`   ${bold("Date:")}     ${order.OrderDate || 'Unknown'}`);
       logger.log(`   ${bold("Total:")}    ${green(order.TotalText || order.Total || '$0.00')}`);
       logger.log(`   ${bold("Status:")}   ${statusColor(status)}`);
       logger.log(dim(`------------------------------------------------------`));
@@ -150,19 +160,26 @@ function printAddressesGrid(addresses, width = 35, logger) {
 
 export function printOrderDetails(data, orderId, logger) {
   const { header, addresses, items } = data || {};
-  
-  if (header && Object.keys(header).length > 0) {
-    logger.log(`\n${bold(cyan("================== ORDER HEADER =================="))}`);
-    const entries = [];
-    for (const [k, v] of Object.entries(header)) {
-      if (v) entries.push([k, v]);
-    }
-    printHeaderGrid(entries, 2, 26, 25, logger);
+
+  const headerEntries = Object.entries(header || {}).filter(([, v]) => v);
+  const filledAddresses = {};
+  for (const [k, v] of Object.entries(addresses || {})) {
+    if (v) filledAddresses[k] = v;
   }
-  
-  if (addresses && Object.keys(addresses).length > 0) {
+
+  if ((!items || items.length === 0) && headerEntries.length === 0 && Object.keys(filledAddresses).length === 0) {
+    logger.log(yellow(`No details found for order ${orderId}. The order may not exist.`));
+    return;
+  }
+
+  if (headerEntries.length > 0) {
+    logger.log(`\n${bold(cyan("================== ORDER HEADER =================="))}`);
+    printHeaderGrid(headerEntries, 2, 26, 25, logger);
+  }
+
+  if (Object.keys(filledAddresses).length > 0) {
     logger.log(`\n${bold(cyan("================= ORDER ADDRESSES ================="))}`);
-    printAddressesGrid(addresses, 35, logger);
+    printAddressesGrid(filledAddresses, 35, logger);
   }
 
   if (items && items.length > 0) {
@@ -205,19 +222,26 @@ export function printOrderDetails(data, orderId, logger) {
 
 export function printInvoiceDetails(data, invoiceId, logger) {
   const { header, addresses, items } = data || {};
-  
-  if (header && Object.keys(header).length > 0) {
-    logger.log(`\n${bold(cyan("================= INVOICE HEADER ================="))}`);
-    const entries = [];
-    for (const [k, v] of Object.entries(header)) {
-      if (v) entries.push([k, v]);
-    }
-    printHeaderGrid(entries, 2, 26, 25, logger);
+
+  const headerEntries = Object.entries(header || {}).filter(([, v]) => v);
+  const filledAddresses = {};
+  for (const [k, v] of Object.entries(addresses || {})) {
+    if (v) filledAddresses[k] = v;
   }
-  
-  if (addresses && Object.keys(addresses).length > 0) {
+
+  if ((!items || items.length === 0) && headerEntries.length === 0 && Object.keys(filledAddresses).length === 0) {
+    logger.log(yellow(`No details found for invoice ${invoiceId}. The invoice may not exist.`));
+    return;
+  }
+
+  if (headerEntries.length > 0) {
+    logger.log(`\n${bold(cyan("================= INVOICE HEADER ================="))}`);
+    printHeaderGrid(headerEntries, 2, 26, 25, logger);
+  }
+
+  if (Object.keys(filledAddresses).length > 0) {
     logger.log(`\n${bold(cyan("================ INVOICE ADDRESSES ================"))}`);
-    printAddressesGrid(addresses, 35, logger);
+    printAddressesGrid(filledAddresses, 35, logger);
   }
 
   if (items && items.length > 0) {

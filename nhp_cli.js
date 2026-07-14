@@ -4,6 +4,18 @@ import { printProducts, printPricing, printOrders, printOrderDetails, printInvoi
 import { parseArgs } from "jsr:@std/cli/parse-args";
 import { Logger } from "./logger.js";
 
+function reportApiMessages(results, logger) {
+  for (const w of results?.Warnings || []) logger.warn(`[Warning] ${w}`);
+  for (const e of results?.Errors || []) logger.error(`[Error] ${e}`);
+  return results?.Success !== false && !(results?.Errors?.length > 0);
+}
+
+async function findMissingCartSkus(client, skus) {
+  const cart = await client.getCart();
+  const lines = cart?.Lines || [];
+  return skus.filter(sku => !lines.some(l => l.SKUID?.toLowerCase() === sku.toLowerCase()));
+}
+
 async function handleLogin(client, logger) {
   await client.ensureLogin(true);
   logger.json({ success: true });
@@ -82,7 +94,7 @@ async function handleCsv(client, csvFile, config, logger) {
 }
 
 async function handleOrders(client, offsetStr, options, logger) {
-  const offset = parseInt(offsetStr || "0", 10);
+  const offset = parseInt(offsetStr || "0", 10) || 0;
   
   logger.log(`Fetching orders (offset: ${offset}, pageSize: 20)...`);
   const results = await client.getOrders(20, offset, options);
@@ -95,7 +107,7 @@ async function handleOrders(client, offsetStr, options, logger) {
 }
 
 async function handleInvoices(client, offsetStr, options, logger) {
-  const offset = parseInt(offsetStr || "0", 10);
+  const offset = parseInt(offsetStr || "0", 10) || 0;
   
   logger.log(`Fetching invoices (offset: ${offset}, pageSize: 20)...`);
   const results = await client.getInvoices(20, offset, options);
@@ -214,8 +226,15 @@ async function handleCart(client, args, logger) {
         logger.log(`Adding ${item.qty} of ${item.sku} to cart...`);
         const results = await client.addToCart(item.sku, item.qty);
         logger.json(results);
+        const ok = reportApiMessages(results, logger);
         if (!logger.isJson) {
-          logger.log(`Successfully added ${item.sku} to cart.`);
+          const missing = ok ? await findMissingCartSkus(client, [item.sku]) : [item.sku];
+          if (missing.length === 0) {
+            logger.log(`Successfully added ${item.sku} to cart.`);
+          } else {
+            logger.error(`[Failed] ${item.sku} was not added to the cart.`);
+            Deno.exit(1);
+          }
         }
       } else {
         logger.log(`Adding ${itemsToAdd.length} items to cart in bulk...`);
@@ -226,7 +245,15 @@ async function handleCart(client, args, logger) {
         const results = await client.uploadCartCsvContent(csvContent, "bulk_add.csv");
         logger.json(results);
         if (!logger.isJson) {
-          logger.log(`Successfully added ${itemsToAdd.length} items to cart.`);
+          const missing = await findMissingCartSkus(client, itemsToAdd.map(i => i.sku));
+          const added = itemsToAdd.length - missing.length;
+          if (missing.length === 0) {
+            logger.log(`Successfully added ${added} items to cart.`);
+          } else {
+            if (added > 0) logger.log(`Added ${added} of ${itemsToAdd.length} items to cart.`);
+            for (const sku of missing) logger.error(`[Failed] '${sku}' was not added to the cart.`);
+            Deno.exit(1);
+          }
         }
       }
       break;
@@ -264,8 +291,14 @@ async function handleCart(client, args, logger) {
       
       const results = await client.removeCartLine(line.ExternalCartLineId);
       logger.json(results);
+      const ok = reportApiMessages(results, logger);
       if (!logger.isJson) {
-        logger.log(`Successfully removed ${line.SKUID} from cart.`);
+        if (ok) {
+          logger.log(`Successfully removed ${line.SKUID} from cart.`);
+        } else {
+          logger.error(`[Failed] Could not remove ${line.SKUID} from cart.`);
+          Deno.exit(1);
+        }
       }
       break;
     }
@@ -299,8 +332,14 @@ async function handleCart(client, args, logger) {
       
       const results = await client.updateCartLineQuantity(line.ExternalCartLineId, quantity);
       logger.json(results);
+      const ok = reportApiMessages(results, logger);
       if (!logger.isJson) {
-        logger.log(`Successfully updated ${line.SKUID} to quantity ${quantity}.`);
+        if (ok) {
+          logger.log(`Successfully updated ${line.SKUID} to quantity ${quantity}.`);
+        } else {
+          logger.error(`[Failed] Could not update ${line.SKUID}.`);
+          Deno.exit(1);
+        }
       }
       break;
     }
@@ -308,8 +347,14 @@ async function handleCart(client, args, logger) {
       logger.log(`Clearing all items from cart...`);
       const results = await client.clearCart();
       logger.json(results);
+      const ok = reportApiMessages(results, logger);
       if (!logger.isJson) {
-        logger.log(`Successfully cleared the cart.`);
+        if (ok) {
+          logger.log(`Successfully cleared the cart.`);
+        } else {
+          logger.error(`[Failed] Could not clear the cart.`);
+          Deno.exit(1);
+        }
       }
       break;
     }
@@ -323,7 +368,14 @@ async function handleCart(client, args, logger) {
       const results = await client.uploadCartCsv(csvFilePath);
       logger.json(results);
       if (!logger.isJson) {
-        logger.log(`Successfully uploaded CSV to cart.`);
+        const products = await parseCsv(csvFilePath);
+        const missing = await findMissingCartSkus(client, products.map(p => p.itemId));
+        if (missing.length === 0) {
+          logger.log(`Successfully uploaded CSV to cart (${products.length} items).`);
+        } else {
+          for (const sku of missing) logger.error(`[Failed] '${sku}' was not added to the cart.`);
+          Deno.exit(1);
+        }
       }
       break;
     }
