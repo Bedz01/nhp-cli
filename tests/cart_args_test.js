@@ -1,4 +1,4 @@
-import { assertEquals, assertExists } from "@std/assert";
+import { assertEquals, assertExists } from "jsr:@std/assert@^1";
 import { parseCartAddArgs } from "../nhp_cli.js";
 
 Deno.test("single part number defaults to qty 1", () => {

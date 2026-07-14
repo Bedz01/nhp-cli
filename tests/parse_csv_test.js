@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals } from "jsr:@std/assert@^1";
 import { parseCsvText } from "../config.js";
 
 Deno.test("two-column CSV with header parses part numbers and quantities", () => {

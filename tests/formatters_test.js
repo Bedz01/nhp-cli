@@ -1,5 +1,5 @@
-import { assert, assertStringIncludes } from "@std/assert";
-import { stripAnsiCode } from "@std/fmt/colors";
+import { assert, assertStringIncludes } from "jsr:@std/assert@^1";
+import { stripAnsiCode } from "jsr:@std/fmt@^1/colors";
 import { printOrderDetails, printPricing } from "../formatters.js";
 import fixture from "./fixtures/pricing_response.json" with { type: "json" };
 

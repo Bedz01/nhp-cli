@@ -2,10 +2,8 @@
   "version": "5",
   "specifiers": {
     "jsr:@std/assert@1": "1.0.15",
-    "jsr:@std/cli@*": "1.0.30",
     "jsr:@std/cli@1": "1.0.30",
     "jsr:@std/fmt@1": "1.0.10",
-    "jsr:@std/http@*": "1.1.1",
     "jsr:@std/http@1": "1.1.1",
     "jsr:@std/internal@^1.0.12": "1.0.14"
   },
@@ -59,13 +57,5 @@
     "https://deno.land/x/deno_dom@v0.1.56/src/dom/utils-types.ts": "96db30e3e4a75b194201bb9fa30988215da7f91b380fca6a5143e51ece2a8436",
     "https://deno.land/x/deno_dom@v0.1.56/src/dom/utils.ts": "bc429635e9204051ba1ecc1b212031b5ee7c6bcd95120c91bef696804aa67e74",
     "https://deno.land/x/deno_dom@v0.1.56/src/parser.ts": "e06b2300d693e6ae7564e53dfa5c9a9e97fdb8c044c39c52c8b93b5d60860be3"
-  },
-  "workspace": {
-    "dependencies": [
-      "jsr:@std/assert@1",
-      "jsr:@std/cli@1",
-      "jsr:@std/fmt@1",
-      "jsr:@std/http@1"
-    ]
   }
 }

@@ -1,4 +1,4 @@
-import { getSetCookies } from "@std/http/cookie";
+import { getSetCookies } from "jsr:@std/http@^1/cookie";
 
 export class CookieJar {
   constructor() {

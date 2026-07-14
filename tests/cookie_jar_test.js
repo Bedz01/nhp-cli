@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals } from "jsr:@std/assert@^1";
 import { CookieJar } from "../cookie-jar.js";
 
 Deno.test("accepts cookies and builds a Cookie header", () => {

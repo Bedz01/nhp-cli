@@ -1,4 +1,4 @@
-import { DOMParser } from "deno_dom";
+import { DOMParser } from "https://deno.land/x/deno_dom@v0.1.56/deno-dom-wasm.ts";
 import { CookieJar } from "./cookie-jar.js";
 import { loadCredentials, parseCsvText } from "./config.js";
 import { Logger } from "./logger.js";

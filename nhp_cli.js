@@ -1,7 +1,7 @@
 import { NHPClient } from "./api.js";
 import { loadConfig, parseCsv } from "./config.js";
 import { printProducts, printPricing, printOrders, printOrderDetails, printInvoices, printInvoiceDetails, printBriefItems, printCart } from "./formatters.js";
-import { parseArgs } from "@std/cli/parse-args";
+import { parseArgs } from "jsr:@std/cli@^1/parse-args";
 import { Logger } from "./logger.js";
 import denoConfig from "./deno.json" with { type: "json" };
 

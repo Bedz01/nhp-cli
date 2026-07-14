@@ -15,8 +15,11 @@ The CLI tool is powered by Deno. You can run it directly with
 `deno run -A nhp_cli.js`, via `deno task cli`, or install it globally as `nhp`:
 
 ```bash
-deno install -g -A -n nhp --config deno.json nhp_cli.js
+deno install -g -A -f -n nhp nhp_cli.js
 ```
+
+All dependencies are referenced with explicit versioned specifiers, so the
+installed command works from any directory without extra flags.
 
 ### Setup
 

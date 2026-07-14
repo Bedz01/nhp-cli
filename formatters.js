@@ -1,4 +1,4 @@
-import { blue, bold, cyan, dim, green, magenta, red, stripAnsiCode, yellow } from "@std/fmt/colors";
+import { blue, bold, cyan, dim, green, magenta, red, stripAnsiCode, yellow } from "jsr:@std/fmt@^1/colors";
 
 export function printProducts(products, logger) {
   if (!products || products.length === 0) {
