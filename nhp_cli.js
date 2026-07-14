@@ -1,8 +1,9 @@
 import { NHPClient } from "./api.js";
 import { loadConfig, parseCsv } from "./config.js";
 import { printProducts, printPricing, printOrders, printOrderDetails, printInvoices, printInvoiceDetails, printBriefItems, printCart } from "./formatters.js";
-import { parseArgs } from "jsr:@std/cli/parse-args";
+import { parseArgs } from "@std/cli/parse-args";
 import { Logger } from "./logger.js";
+import denoConfig from "./deno.json" with { type: "json" };
 
 function reportApiMessages(results, logger) {
   for (const w of results?.Warnings || []) logger.warn(`[Warning] ${w}`);
@@ -10,10 +11,53 @@ function reportApiMessages(results, logger) {
   return results?.Success !== false && !(results?.Errors?.length > 0);
 }
 
-async function findMissingCartSkus(client, skus) {
+async function findMissingCartParts(client, partNumbers) {
   const cart = await client.getCart();
   const lines = cart?.Lines || [];
-  return skus.filter(sku => !lines.some(l => l.SKUID?.toLowerCase() === sku.toLowerCase()));
+  return partNumbers.filter((pn) => !lines.some((l) => l.SKUID?.toLowerCase() === pn.toLowerCase()));
+}
+
+// Finds a cart line by part number, internal line ID, or 1-based line number.
+// Part numbers can be all-numeric (e.g. 06850863), so exact part number
+// matches take priority over line-number interpretation.
+function findCartLine(cart, target) {
+  const lines = cart?.Lines || [];
+  let line = lines.find((l) => l.SKUID?.toLowerCase() === target.toLowerCase() || l.ExternalCartLineId === target);
+  if (!line && /^\d+$/.test(target)) {
+    const index = parseInt(target, 10) - 1;
+    if (index >= 0 && index < lines.length) line = lines[index];
+  }
+  return line;
+}
+
+// Parses `cart add` arguments. Accepted forms:
+//   add <part>                      - quantity 1
+//   add <part> <qty>                - qty must be 1-9999 with no leading zero;
+//                                     anything else is treated as a second part
+//                                     number, since part numbers can be numeric
+//   add <part>[:qty] <part>[:qty]…  - explicit per-part quantities, any size
+export function parseCartAddArgs(userArgs) {
+  const QTY_RE = /^[1-9]\d{0,3}$/;
+  if (userArgs.length === 2 && !userArgs[0].includes(":") && !userArgs[1].includes(":") && QTY_RE.test(userArgs[1])) {
+    return { items: [{ partNumber: userArgs[0], qty: parseInt(userArgs[1], 10) }] };
+  }
+
+  const items = [];
+  for (const arg of userArgs) {
+    if (arg.includes(":")) {
+      const [partNumber, qtyStr] = arg.split(":");
+      if (!partNumber) {
+        return { error: `Invalid item '${arg}': missing part number.` };
+      }
+      if (!/^[1-9]\d*$/.test(qtyStr || "")) {
+        return { error: `Invalid quantity in '${arg}'. Use <partNumber>:<qty> with a positive whole number.` };
+      }
+      items.push({ partNumber, qty: parseInt(qtyStr, 10) });
+    } else {
+      items.push({ partNumber: arg, qty: 1 });
+    }
+  }
+  return { items };
 }
 
 async function handleLogin(client, logger) {
@@ -30,9 +74,9 @@ async function handleSearch(client, args, logger) {
   }
   logger.log(`Searching for "${query}"...`);
   const results = await client.searchProducts(query);
-  
+
   logger.json(results);
-  
+
   if (!logger.isJson) {
     const products = results?.widgets?.[0]?.content || [];
     printProducts(products, logger);
@@ -41,16 +85,16 @@ async function handleSearch(client, args, logger) {
 
 async function handlePrice(client, items, config, logger) {
   if (items.length === 0) {
-    logger.error("Please specify at least one item ID.");
+    logger.error("Please specify at least one part number.");
     Deno.exit(1);
   }
   logger.log(`Fetching price and stock for: ${items.join(", ")}...`);
-  
-  const productItems = items.map(itemId => ({ itemId: String(itemId), qty: 1 }));
+
+  const productItems = items.map((itemId) => ({ itemId: String(itemId), qty: 1 }));
   const results = await client.getPriceAndStock(productItems);
-  
+
   logger.json(results);
-  
+
   if (!logger.isJson) {
     printPricing(results?.ChildProducts || [], productItems, config, logger);
   }
@@ -61,7 +105,7 @@ async function handleCsv(client, csvFile, config, logger) {
     logger.error("Please specify a CSV file path.");
     Deno.exit(1);
   }
-  
+
   logger.log(`Reading CSV file: ${csvFile}...`);
   const products = await parseCsv(csvFile);
   if (products.length === 0) {
@@ -69,10 +113,10 @@ async function handleCsv(client, csvFile, config, logger) {
     Deno.exit(1);
   }
   logger.log(`Parsed ${products.length} products from CSV.`);
-  
+
   const allResults = [];
   const batchSize = 20;
-  
+
   for (let i = 0; i < products.length; i += batchSize) {
     const batch = products.slice(i, i + batchSize);
     logger.log(`Fetching pricing for batch ${Math.floor(i / batchSize) + 1} (${batch.length} items)...`);
@@ -85,7 +129,7 @@ async function handleCsv(client, csvFile, config, logger) {
       logger.error(`[Error] Failed to fetch pricing for batch starting at index ${i}:`, err.message);
     }
   }
-  
+
   logger.json(allResults);
 
   if (!logger.isJson) {
@@ -95,12 +139,12 @@ async function handleCsv(client, csvFile, config, logger) {
 
 async function handleOrders(client, offsetStr, options, logger) {
   const offset = parseInt(offsetStr || "0", 10) || 0;
-  
+
   logger.log(`Fetching orders (offset: ${offset}, pageSize: 20)...`);
   const results = await client.getOrders(20, offset, options);
-  
+
   logger.json(results);
-  
+
   if (!logger.isJson) {
     printOrders(results?.NhpOrders || [], logger, options.brief);
   }
@@ -108,12 +152,12 @@ async function handleOrders(client, offsetStr, options, logger) {
 
 async function handleInvoices(client, offsetStr, options, logger) {
   const offset = parseInt(offsetStr || "0", 10) || 0;
-  
+
   logger.log(`Fetching invoices (offset: ${offset}, pageSize: 20)...`);
   const results = await client.getInvoices(20, offset, options);
-  
+
   logger.json(results);
-  
+
   if (!logger.isJson) {
     printInvoices(results?.NhpInvoices || [], logger, options.brief);
   }
@@ -124,17 +168,20 @@ async function handleOrderDetails(client, orderId, options, logger) {
     logger.error("Please specify an order ID.");
     Deno.exit(1);
   }
-  
+
   const brief = options?.brief;
   if (!brief) logger.log(`Fetching details for order: ${orderId}...`);
   const data = await client.getOrderDetails(orderId);
-  
+
   logger.json(data);
-  
+
   if (!logger.isJson) {
     if (brief) {
-      if (data?.items) {
+      if (data?.items?.length) {
         printBriefItems(data, logger);
+      } else {
+        logger.error(`No items found for order ${orderId}. The order may not exist.`);
+        Deno.exit(1);
       }
     } else {
       printOrderDetails(data, orderId, logger);
@@ -147,17 +194,20 @@ async function handleInvoiceDetails(client, invoiceId, options, logger) {
     logger.error("Please specify an invoice ID.");
     Deno.exit(1);
   }
-  
+
   const brief = options?.brief;
   if (!brief) logger.log(`Fetching details for invoice: ${invoiceId}...`);
   const data = await client.getInvoiceDetails(invoiceId);
-  
+
   logger.json(data);
-  
+
   if (!logger.isJson) {
     if (brief) {
-      if (data?.items) {
+      if (data?.items?.length) {
         printBriefItems(data, logger);
+      } else {
+        logger.error(`No items found for invoice ${invoiceId}. The invoice may not exist.`);
+        Deno.exit(1);
       }
     } else {
       printInvoiceDetails(data, invoiceId, logger);
@@ -171,14 +221,14 @@ async function handlePo(client, args, logger) {
     logger.error("Please specify a PO string to search for.");
     Deno.exit(1);
   }
-  
+
   logger.log(`Searching for PO matching "${query}"...`);
-  
+
   const res = await client.getOrders(20, 0, { purchaseNumber: query });
   const matchedOrders = res?.NhpOrders || [];
-  
+
   logger.json(matchedOrders);
-  
+
   if (!logger.isJson) {
     if (matchedOrders.length === 0) {
       logger.log(`No orders found matching PO "${query}".`);
@@ -190,70 +240,56 @@ async function handlePo(client, args, logger) {
     } else {
       logger.log(`\nFound ${matchedOrders.length} matching orders:`);
       printOrders(matchedOrders, logger);
-      logger.log(`Please run 'deno run -A nhp_cli.js order <OrderId>' to view details for the desired order.`);
+      logger.log(`Please run 'nhp order <OrderId>' to view details for the desired order.`);
     }
   }
 }
 
 async function handleCart(client, args, logger) {
   const subCmd = args[0];
-  switch(subCmd) {
+  switch (subCmd) {
     case "add": {
-      const userArgs = args.slice(1);
-      if (userArgs.length === 0 || !userArgs[0]) {
-        logger.error("Please specify at least one product ID to add.");
+      const userArgs = args.slice(1).filter(Boolean);
+      if (userArgs.length === 0) {
+        logger.error("Please specify at least one part number to add.");
         Deno.exit(1);
       }
 
-      let itemsToAdd = [];
-      if (userArgs.length === 1 || (userArgs.length === 2 && !isNaN(userArgs[1]) && !userArgs[0].includes(':'))) {
-        const productId = userArgs[0];
-        const quantity = parseInt(userArgs[1] || "1", 10);
-        itemsToAdd.push({ sku: productId, qty: quantity });
-      } else {
-        for (const arg of userArgs) {
-          if (arg.includes(':')) {
-            const [sku, qtyStr] = arg.split(':');
-            itemsToAdd.push({ sku, qty: parseInt(qtyStr || "1", 10) });
-          } else {
-            itemsToAdd.push({ sku: arg, qty: 1 });
-          }
-        }
+      const { items, error } = parseCartAddArgs(userArgs);
+      if (error) {
+        logger.error(error);
+        Deno.exit(1);
       }
 
-      if (itemsToAdd.length === 1) {
-        const item = itemsToAdd[0];
-        logger.log(`Adding ${item.qty} of ${item.sku} to cart...`);
-        const results = await client.addToCart(item.sku, item.qty);
+      if (items.length === 1) {
+        const item = items[0];
+        logger.log(`Adding ${item.qty} of ${item.partNumber} to cart...`);
+        const results = await client.addToCart(item.partNumber, item.qty);
         logger.json(results);
         const ok = reportApiMessages(results, logger);
-        if (!logger.isJson) {
-          const missing = ok ? await findMissingCartSkus(client, [item.sku]) : [item.sku];
-          if (missing.length === 0) {
-            logger.log(`Successfully added ${item.sku} to cart.`);
-          } else {
-            logger.error(`[Failed] ${item.sku} was not added to the cart.`);
-            Deno.exit(1);
-          }
+        const missing = ok ? await findMissingCartParts(client, [item.partNumber]) : [item.partNumber];
+        if (missing.length === 0) {
+          logger.log(`Successfully added ${item.partNumber} to cart.`);
+        } else {
+          logger.error(`[Failed] ${item.partNumber} was not added to the cart.`);
+          Deno.exit(1);
         }
       } else {
-        logger.log(`Adding ${itemsToAdd.length} items to cart in bulk...`);
+        logger.log(`Adding ${items.length} items to cart in bulk...`);
         let csvContent = "Part Number,Quantity\r\n";
-        for (const item of itemsToAdd) {
-          csvContent += `${item.sku},${item.qty}\r\n`;
+        for (const item of items) {
+          csvContent += `${item.partNumber},${item.qty}\r\n`;
         }
         const results = await client.uploadCartCsvContent(csvContent, "bulk_add.csv");
         logger.json(results);
-        if (!logger.isJson) {
-          const missing = await findMissingCartSkus(client, itemsToAdd.map(i => i.sku));
-          const added = itemsToAdd.length - missing.length;
-          if (missing.length === 0) {
-            logger.log(`Successfully added ${added} items to cart.`);
-          } else {
-            if (added > 0) logger.log(`Added ${added} of ${itemsToAdd.length} items to cart.`);
-            for (const sku of missing) logger.error(`[Failed] '${sku}' was not added to the cart.`);
-            Deno.exit(1);
-          }
+        reportApiMessages(results, logger);
+        const added = results.requested.length - results.missing.length;
+        if (results.missing.length === 0) {
+          logger.log(`Successfully added ${added} items to cart.`);
+        } else {
+          if (added > 0) logger.log(`Added ${added} of ${results.requested.length} items to cart.`);
+          for (const pn of results.missing) logger.error(`[Failed] '${pn}' was not added to the cart.`);
+          Deno.exit(1);
         }
       }
       break;
@@ -270,76 +306,58 @@ async function handleCart(client, args, logger) {
     case "remove": {
       const target = args[1];
       if (!target) {
-        logger.error("Please specify a SKU or Line ID to remove.");
+        logger.error("Please specify a part number or line number to remove.");
         Deno.exit(1);
       }
       logger.log(`Removing item '${target}' from cart...`);
-      
+
       const cart = await client.getCart();
-      let line;
-      if (/^\d+$/.test(target)) {
-        const index = parseInt(target, 10) - 1;
-        line = cart?.Lines?.[index];
-      } else {
-        line = cart?.Lines?.find(l => l.SKUID.toLowerCase() === target.toLowerCase() || l.ExternalCartLineId === target);
-      }
-      
+      const line = findCartLine(cart, target);
       if (!line) {
         logger.error(`Item '${target}' not found in cart.`);
         Deno.exit(1);
       }
-      
+
       const results = await client.removeCartLine(line.ExternalCartLineId);
       logger.json(results);
       const ok = reportApiMessages(results, logger);
-      if (!logger.isJson) {
-        if (ok) {
-          logger.log(`Successfully removed ${line.SKUID} from cart.`);
-        } else {
-          logger.error(`[Failed] Could not remove ${line.SKUID} from cart.`);
-          Deno.exit(1);
-        }
+      if (ok) {
+        logger.log(`Successfully removed ${line.SKUID} from cart.`);
+      } else {
+        logger.error(`[Failed] Could not remove ${line.SKUID} from cart.`);
+        Deno.exit(1);
       }
       break;
     }
     case "update": {
       const target = args[1];
-      const quantity = parseInt(args[2] || "1", 10);
+      const quantity = parseInt(args[2] || "", 10);
       if (!target) {
-        logger.error("Please specify a SKU or Line ID to update.");
+        logger.error("Please specify a part number or line number to update.");
         Deno.exit(1);
       }
       if (isNaN(quantity) || quantity < 0) {
         logger.error("Please specify a valid quantity.");
         Deno.exit(1);
       }
-      
+
       logger.log(`Updating item '${target}' quantity to ${quantity}...`);
-      
+
       const cart = await client.getCart();
-      let line;
-      if (/^\d+$/.test(target)) {
-        const index = parseInt(target, 10) - 1;
-        line = cart?.Lines?.[index];
-      } else {
-        line = cart?.Lines?.find(l => l.SKUID.toLowerCase() === target.toLowerCase() || l.ExternalCartLineId === target);
-      }
-      
+      const line = findCartLine(cart, target);
       if (!line) {
         logger.error(`Item '${target}' not found in cart.`);
         Deno.exit(1);
       }
-      
+
       const results = await client.updateCartLineQuantity(line.ExternalCartLineId, quantity);
       logger.json(results);
       const ok = reportApiMessages(results, logger);
-      if (!logger.isJson) {
-        if (ok) {
-          logger.log(`Successfully updated ${line.SKUID} to quantity ${quantity}.`);
-        } else {
-          logger.error(`[Failed] Could not update ${line.SKUID}.`);
-          Deno.exit(1);
-        }
+      if (ok) {
+        logger.log(`Successfully updated ${line.SKUID} to quantity ${quantity}.`);
+      } else {
+        logger.error(`[Failed] Could not update ${line.SKUID}.`);
+        Deno.exit(1);
       }
       break;
     }
@@ -348,13 +366,11 @@ async function handleCart(client, args, logger) {
       const results = await client.clearCart();
       logger.json(results);
       const ok = reportApiMessages(results, logger);
-      if (!logger.isJson) {
-        if (ok) {
-          logger.log(`Successfully cleared the cart.`);
-        } else {
-          logger.error(`[Failed] Could not clear the cart.`);
-          Deno.exit(1);
-        }
+      if (ok) {
+        logger.log(`Successfully cleared the cart.`);
+      } else {
+        logger.error(`[Failed] Could not clear the cart.`);
+        Deno.exit(1);
       }
       break;
     }
@@ -367,15 +383,14 @@ async function handleCart(client, args, logger) {
       logger.log(`Uploading cart CSV '${csvFilePath}'...`);
       const results = await client.uploadCartCsv(csvFilePath);
       logger.json(results);
-      if (!logger.isJson) {
-        const products = await parseCsv(csvFilePath);
-        const missing = await findMissingCartSkus(client, products.map(p => p.itemId));
-        if (missing.length === 0) {
-          logger.log(`Successfully uploaded CSV to cart (${products.length} items).`);
-        } else {
-          for (const sku of missing) logger.error(`[Failed] '${sku}' was not added to the cart.`);
-          Deno.exit(1);
-        }
+      reportApiMessages(results, logger);
+      const added = results.requested.length - results.missing.length;
+      if (results.missing.length === 0) {
+        logger.log(`Successfully uploaded CSV to cart (${added} items).`);
+      } else {
+        if (added > 0) logger.log(`Added ${added} of ${results.requested.length} items to cart.`);
+        for (const pn of results.missing) logger.error(`[Failed] '${pn}' was not added to the cart.`);
+        Deno.exit(1);
       }
       break;
     }
@@ -385,45 +400,92 @@ async function handleCart(client, args, logger) {
   }
 }
 
-function showHelp(logger) {
-  logger.log(`NHP API Client CLI`);
-  logger.log(`Usage:`);
-  logger.log(`  deno run -A nhp_cli.js <command> [--json] [--verbose]`);
-  logger.log(`  Commands:`);
-  logger.log(`  deno run -A nhp_cli.js search <query>       - Search for products`);
-  logger.log(`  deno run -A nhp_cli.js price <itemId...>    - Get price and stock info for product(s) (qty=1)`);
-  logger.log(`  deno run -A nhp_cli.js csv <csvFile>        - Get price and stock for products in a CSV file`);
-  logger.log(`  deno run -A nhp_cli.js orders [offset] [--brief] - Get order history. Accepts --dateFrom, --dateTo, --purchaseNumber, etc.`);
-  logger.log(`  deno run -A nhp_cli.js invoices [offset] [--brief] - Get invoice history. Accepts --dateFrom, --dateTo, --purchaseNumber, etc.`);
-  logger.log(`  deno run -A nhp_cli.js invoice <id> [--brief] - Get invoice details (items)`);
-  logger.log(`  deno run -A nhp_cli.js order <orderId> [--brief]- Get order details (items)`);
-  logger.log(`  deno run -A nhp_cli.js po <query>           - Search order details by PO Number`);
-  logger.log(`  deno run -A nhp_cli.js cart <subcommand>    - Manage cart (add, list, remove, update, clear, upload)`);
-  logger.log(`  deno run -A nhp_cli.js login                - Force login and refresh cookies`);
+function showHelp() {
+  console.log(`NHP CLI v${denoConfig.version} - NHP New Zealand trade portal client
+
+Usage:
+  nhp <command> [options]
+  (or: deno run -A nhp_cli.js <command> [options])
+
+Products & Pricing:
+  search <query>              Search for products
+  price <partNumber...>       Price and stock for one or more part numbers
+  csv <file>                  Price and stock for part numbers in a CSV file
+                              (columns: partNumber[,qty] - qty defaults to 1)
+
+Orders & Invoices:
+  orders [offset] [--brief]   Order history (20 per page)
+  invoices [offset] [--brief] Invoice history (20 per page)
+  order <orderId> [--brief]   Line items and shipping status for an order
+  invoice <id> [--brief]      Line items for an invoice
+  po <query>                  Search order history by PO number
+
+Cart:
+  cart add <part> [qty]       Add a part to the cart (qty 1-9999)
+  cart add <part>[:qty] ...   Add multiple parts (e.g. K144:2 06850863:10)
+  cart list                   Show cart contents
+  cart remove <part|line#>    Remove an item (by part number or line number)
+  cart update <part|line#> <qty>  Change an item's quantity
+  cart clear                  Empty the cart
+  cart upload <file>          Upload a CSV of parts to the cart
+
+Authentication:
+  login                       Force a fresh login and refresh cookies
+
+Options:
+  --json                      Print the raw API response as JSON on stdout
+  --verbose                   Show debug output (auth flow, etc.)
+  --brief                     Compact output for orders/invoices commands
+  --dateFrom, --dateTo, --purchaseNumber, --documentNumber,
+  --orderNumber, --customerReference
+                              Search filters for orders/invoices
+  -h, --help                  Show this help
+  --version                   Show version
+
+Failed operations exit with a non-zero status code.`);
 }
 
 if (import.meta.main) {
   const config = await loadConfig();
-  
+
+  const unknownFlags = [];
   const parsedArgs = parseArgs(Deno.args, {
-    boolean: ["json", "verbose", "brief"],
+    boolean: ["json", "verbose", "brief", "help", "version"],
+    // "_" keeps positional args as strings - otherwise numeric part numbers
+    // like 06850863 get coerced to numbers and lose their leading zeros
+    string: ["_", "dateFrom", "dateTo", "purchaseNumber", "documentNumber", "orderNumber", "customerReference"],
+    alias: { h: "help" },
+    unknown: (arg) => {
+      if (arg.startsWith("-")) unknownFlags.push(arg);
+      return true;
+    },
   });
-  
-  const { _, json: isJsonMode, verbose, ...options } = parsedArgs;
+
+  const { _, json: isJsonMode, verbose, help, h: _h, version, ...options } = parsedArgs;
   const args = _.map(String);
-  
+
   const logger = new Logger({ isJson: isJsonMode, verbose: verbose });
 
-  if (args.length === 0) {
-    showHelp(logger);
+  if (unknownFlags.length > 0) {
+    logger.error(`Unknown flag(s): ${unknownFlags.join(", ")}. Run 'nhp help' for usage.`);
+    Deno.exit(1);
+  }
+
+  if (version) {
+    console.log(`nhp-cli ${denoConfig.version}`);
+    Deno.exit(0);
+  }
+
+  if (help || args.length === 0 || args[0] === "help") {
+    showHelp();
     Deno.exit(0);
   }
 
   const cmd = args[0];
   const client = new NHPClient({
-    silent: isJsonMode, 
+    silent: isJsonMode,
     logger: logger,
-    ...config 
+    ...config,
   });
 
   try {
@@ -459,7 +521,7 @@ if (import.meta.main) {
         await handleCart(client, args.slice(1), logger);
         break;
       default:
-        logger.error(`Unknown command: ${cmd}`);
+        logger.error(`Unknown command: ${cmd}. Run 'nhp help' for usage.`);
         Deno.exit(1);
     }
   } catch (err) {

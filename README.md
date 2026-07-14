@@ -1,8 +1,8 @@
 # NHPProxy CLI & Library
 
 This package provides a CLI and an API Library to integrate with NHP New
-Zealand. You can search products, check pricing, check stock availability, and
-pull order/invoice history.
+Zealand. You can search products, check pricing, check stock availability,
+manage your cart, and pull order/invoice history.
 
 > [!NOTE]
 > This tool is currently configured for NHP New Zealand (`nhpnz.co.nz`).
@@ -11,8 +11,12 @@ pull order/invoice history.
 
 ## CLI Usage
 
-The CLI tool is powered by Deno. You can run it directly using `nhp_cli.js` (or
-via `deno task cli`).
+The CLI tool is powered by Deno. You can run it directly with
+`deno run -A nhp_cli.js`, via `deno task cli`, or install it globally as `nhp`:
+
+```bash
+deno install -g -A -n nhp --config deno.json nhp_cli.js
+```
 
 ### Setup
 
@@ -39,54 +43,67 @@ environment variables:
 - `NHP_SELL_MARGIN` *(optional)*
 
 Once configured, the CLI will automatically log in on its first run and cache
-your session in `cookies.json`.
+your session in `cookies.json` (stored alongside the module, no matter which
+directory you run from).
 
 ### Commands
 
-**Authentication**
-
-- `deno run -A nhp_cli.js login` - Force login and refresh cookies.
+Run `nhp help` (or `nhp --help`) for the full built-in reference.
 
 **Products & Pricing**
 
-- `deno run -A nhp_cli.js search <query>` - Search for products matching a
-  query.
-- `deno run -A nhp_cli.js price <itemId...>` - Get price and stock info for
-  specific product(s).
-- `deno run -A nhp_cli.js csv <csvFile>` - Get price and stock for products
-  listed in a CSV file.
+- `nhp search <query>` - Search for products matching a query.
+- `nhp price <partNumber...>` - Get price and stock info for one or more part
+  numbers.
+- `nhp csv <csvFile>` - Get price and stock for part numbers listed in a CSV
+  file. Columns: `partNumber[,qty]` - a single-column file of part numbers also
+  works (qty defaults to 1), and a header row is skipped automatically.
 
 **Orders & Invoices**
 
-- `deno run -A nhp_cli.js orders [offset] [--brief]` - Get order history. Optional search
-  flags: `--dateFrom`, `--dateTo`, `--purchaseNumber`, `--documentNumber`,
+- `nhp orders [offset] [--brief]` - Get order history. Optional search flags:
+  `--dateFrom`, `--dateTo`, `--purchaseNumber`, `--documentNumber`,
   `--orderNumber`, `--customerReference`. Add `--brief` for a compact table view.
-- `deno run -A nhp_cli.js invoices [offset] [--brief]` - Get invoice history. Accepts the
-  same optional search flags as orders. Add `--brief` for a compact table view.
-- `deno run -A nhp_cli.js order <orderId>` - Get detailed line items and
-  shipping status for a specific order.
-- `deno run -A nhp_cli.js invoice <id>` - Get detailed line items for a specific
-  invoice.
-- `deno run -A nhp_cli.js po <query>` - Search order history by PO Number.
+- `nhp invoices [offset] [--brief]` - Get invoice history. Accepts the same
+  optional search flags as orders.
+- `nhp order <orderId> [--brief]` - Get detailed line items and shipping status
+  for a specific order.
+- `nhp invoice <id> [--brief]` - Get detailed line items for a specific invoice.
+- `nhp po <query>` - Search order history by PO Number.
 
 **Cart Management**
 
-- `deno run -A nhp_cli.js cart add <sku> [qty]` - Add item(s) to cart. Supports bulk adding (`sku1:qty1 sku2:qty2`).
-- `deno run -A nhp_cli.js cart list` - View current items in the cart.
-- `deno run -A nhp_cli.js cart remove <sku_or_lineId>` - Remove an item from the cart.
-- `deno run -A nhp_cli.js cart update <sku_or_lineId> <qty>` - Update quantity of a cart item.
-- `deno run -A nhp_cli.js cart clear` - Empty the entire cart.
-- `deno run -A nhp_cli.js cart upload <csvFilePath>` - Upload a CSV file directly to the cart.
+- `nhp cart add <partNumber> [qty]` - Add an item to the cart. The two-argument
+  form treats the second argument as a quantity only when it is 1-9999 with no
+  leading zero; anything else (e.g. the numeric part number `06850863`) is
+  treated as a second part number. For explicit quantities - including large
+  ones - use the `part:qty` form: `nhp cart add K144:2 06850863:10`.
+- `nhp cart list` - View current items in the cart.
+- `nhp cart remove <partNumber|line#>` - Remove an item, by part number or by
+  the line number shown in `cart list`. Part numbers take priority when both
+  interpretations are possible.
+- `nhp cart update <partNumber|line#> <qty>` - Update the quantity of a cart item.
+- `nhp cart clear` - Empty the entire cart.
+- `nhp cart upload <csvFilePath>` - Upload a CSV of part numbers to the cart
+  (same format as `nhp csv`). The tool verifies every part actually landed in
+  the cart and reports any that were rejected.
 
-### JSON Output
+**Authentication**
 
-You can append `--json` to any command to receive the raw JSON response instead
-of the formatted terminal output. This is highly useful for chaining commands or
-piping data into other applications.
+- `nhp login` - Force login and refresh cookies.
+
+### JSON Output & Exit Codes
+
+You can append `--json` to any command to receive the raw JSON response on
+stdout instead of the formatted terminal output. Progress and error messages go
+to stderr, so stdout stays valid JSON for piping:
 
 ```bash
-deno run -A nhp_cli.js orders 0 --purchaseNumber PO-12345 --json > orders.json
+nhp orders 0 --purchaseNumber PO-12345 --json > orders.json
 ```
+
+Failed operations (unknown part numbers on `cart add`, items not found, API
+errors) exit with a non-zero status code, so the CLI is safe to script against.
 
 ---
 
@@ -108,7 +125,7 @@ import { NHPClient } from "./mod.js";
 
 Create a new instance of the client. By default, it will attempt to read
 credentials from `credentials.json` (or environment variables) and persist
-session cookies to `cookies.json`.
+session cookies to `cookies.json` next to the module.
 
 ```javascript
 const client = new NHPClient({
@@ -118,12 +135,16 @@ const client = new NHPClient({
     username: "your_email@example.com",
     password: "your_password",
   },
+  timeoutMs: 120000, // Per-request timeout (default 120s - the NHP portal is slow)
   silent: true, // Set to true to suppress internal console log messages
 });
 
 // Always call ensureLogin() before making API calls
 await client.ensureLogin();
 ```
+
+All requests carry a timeout and automatically re-authenticate once if the
+saved session has expired.
 
 ### API Methods
 
@@ -139,7 +160,8 @@ console.log(results.widgets[0].content); // Array of products
 #### `getPriceAndStock(products)`
 
 Fetches the current pricing and stock availability (including local NZ and AU
-stock). Expects an array of objects containing `itemId` and `qty`.
+stock). Expects an array of objects containing `itemId` (the part number) and
+`qty`.
 
 ```javascript
 const items = [
@@ -150,6 +172,10 @@ const pricingData = await client.getPriceAndStock(items);
 
 // Example response mapping:
 for (const prod of pricingData.ChildProducts) {
+  if (prod.HasError || prod.ProductExist === false) {
+    // Unknown part - the reason is in prod.ErrorMessages
+    continue;
+  }
   console.log(`Buy Price: ${prod.AdjustedPriceWithCurrency}`);
   console.log(`NZ Stock: ${prod.OnHandQty}`);
 }
@@ -212,8 +238,17 @@ await client.updateCartLineQuantity(cart.Lines[0].ExternalCartLineId, 5);
 await client.removeCartLine(cart.Lines[0].ExternalCartLineId);
 await client.clearCart();
 
-// You can also upload CSV files directly to the cart
-await client.uploadCartCsv("./bulk_order.csv");
+// CSV uploads verify the result against the cart, since the NHP upload
+// endpoint does not report failures in its response:
+const result = await client.uploadCartCsv("./bulk_order.csv");
+// -> { success: boolean, requested: string[], missing: string[] }
 ```
 
+## Development
 
+```bash
+deno task check   # lint + type-check + tests
+deno task test    # offline unit tests only
+```
+
+Offline unit tests live in `tests/` and run in CI on every push.

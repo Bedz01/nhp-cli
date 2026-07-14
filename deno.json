@@ -1,13 +1,22 @@
 {
   "name": "nhp-cli",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "exports": "./mod.js",
+  "imports": {
+    "@std/assert": "jsr:@std/assert@^1",
+    "@std/cli/parse-args": "jsr:@std/cli@^1/parse-args",
+    "@std/fmt/colors": "jsr:@std/fmt@^1/colors",
+    "@std/http/cookie": "jsr:@std/http@^1/cookie",
+    "deno_dom": "https://deno.land/x/deno_dom@v0.1.56/deno-dom-wasm.ts"
+  },
   "tasks": {
-    "cli": "deno run -A nhp_cli.js"
+    "cli": "deno run -A nhp_cli.js",
+    "test": "deno test -A tests/",
+    "check": "deno lint && deno check mod.js nhp_cli.js && deno test -A tests/"
   },
   "lint": {
     "rules": {
-      "exclude": ["no-import-prefix", "no-external-import", "no-unversioned-import", "no-unused-vars"]
+      "exclude": ["no-slow-types"]
     }
   }
 }

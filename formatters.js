@@ -1,4 +1,4 @@
-import { green, yellow, red, cyan, bold, dim, blue, magenta, stripColor } from "https://deno.land/std@0.224.0/fmt/colors.ts";
+import { blue, bold, cyan, dim, green, magenta, red, stripAnsiCode, yellow } from "@std/fmt/colors";
 
 export function printProducts(products, logger) {
   if (!products || products.length === 0) {
@@ -7,7 +7,7 @@ export function printProducts(products, logger) {
   }
   logger.log(`\n${bold(cyan("=================== SEARCH RESULTS ==================="))}`);
   for (const prod of products) {
-    logger.log(` ${bold(blue("•"))} ${bold("SKU:")}   ${cyan(prod.sku)}`);
+    logger.log(` ${bold(blue("•"))} ${bold("Part:")}  ${cyan(prod.sku)}`);
     logger.log(`   ${bold("Name:")}  ${prod.name || prod.custom_display_name || 'N/A'}`);
     logger.log(`   ${bold("Brand:")} ${prod.brand || 'N/A'}`);
     logger.log(`   ${bold("URL:")}   ${dim(prod.product_url || 'N/A')}`);
@@ -123,7 +123,7 @@ export function printInvoices(invoices, logger, brief = false) {
 }
 
 function padText(text, width) {
-  const stripped = stripColor(text);
+  const stripped = stripAnsiCode(text);
   const padding = Math.max(0, width - stripped.length);
   return text + ' '.repeat(padding);
 }
@@ -298,7 +298,7 @@ export function printCart(cartData, logger) {
   logger.log(`\n${bold(cyan("====================== SHOPPING CART ======================"))} `);
   let index = 1;
   for (const item of cartData.Lines) {
-    logger.log(` ${bold(blue(index++ + "."))} ${padText(bold("SKU:"), 10)} ${cyan(item.SKUID)}`);
+    logger.log(` ${bold(blue(index++ + "."))} ${padText(bold("Part:"), 10)} ${cyan(item.SKUID)}`);
     logger.log(`    ${padText(bold("Desc:"), 10)} ${item.DisplayName}`);
     logger.log(`    ${padText(bold("Qty:"), 10)} ${green(bold(item.Quantity))} ${dim(`(@ ${item.LinePrice} ea)`)}`);
     logger.log(`    ${padText(bold("Total:"), 10)} ${green(item.LineTotal)}`);

@@ -1,0 +1,36 @@
+{
+  "ChildProducts": [
+    {
+      "ProductId": "PGT8710",
+      "DisplayName": null,
+      "DCOnHandQty": 0,
+      "OnHandQty": 0,
+      "AdjustedPriceWithCurrency": null,
+      "StockStatusName": null,
+      "HasError": true,
+      "ErrorMessages": [
+        "Item not recognised. Please contact us via sales@nhp-nz.com or call 0800 647 647"
+      ],
+      "Discount": null,
+      "CanAddToCart": false,
+      "ProductExist": false
+    },
+    {
+      "ProductId": "P160F23100TM",
+      "DisplayName": "TemBreak PRO 160AF",
+      "Description": "Terasaki TemBreak PRO MCCB 160 Frame 36kA 3P 100A Adj. Therm. Adj. Mag.",
+      "DCOnHandQty": 125,
+      "OnHandQty": 6,
+      "AdjustedPriceWithCurrency": "$363.66",
+      "StockStatusName": "In-Stock",
+      "HasError": false,
+      "ErrorMessages": null,
+      "Discount": "Discount 67.00%",
+      "CanAddToCart": true,
+      "ProductExist": true
+    }
+  ],
+  "Success": true,
+  "Errors": [],
+  "Warnings": []
+}

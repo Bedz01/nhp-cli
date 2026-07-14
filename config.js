@@ -1,5 +1,5 @@
 export async function loadConfig() {
-  let config = { sellMarginMultiplier: null };
+  const config = { sellMarginMultiplier: null };
   try {
     const configUrl = new URL("credentials.json", import.meta.url);
     const text = await Deno.readTextFile(configUrl);
@@ -7,12 +7,13 @@ export async function loadConfig() {
     if (json.sellMarginMultiplier !== undefined) {
       config.sellMarginMultiplier = json.sellMarginMultiplier;
     }
-  } catch (err) {
+  } catch {
     // Ignore if not present
   }
   const marginEnv = Deno.env.get("NHP_SELL_MARGIN");
   if (marginEnv !== undefined && marginEnv !== null) {
-    config.sellMarginMultiplier = parseFloat(marginEnv);
+    const margin = parseFloat(marginEnv);
+    config.sellMarginMultiplier = isNaN(margin) ? null : margin;
   }
   return config;
 }
@@ -25,7 +26,7 @@ export async function loadCredentials() {
     if (json.username && json.password) {
       return { username: json.username, password: json.password };
     }
-  } catch (err) {
+  } catch {
     // Ignore, try env vars next
   }
 
@@ -38,25 +39,33 @@ export async function loadCredentials() {
   throw new Error("Credentials not found. Please configure 'credentials.json' or set NHP_USERNAME and NHP_PASSWORD env variables.");
 }
 
-
-export async function parseCsv(filePath) {
-  const text = await Deno.readTextFile(filePath);
-  const lines = text.split(/\r?\n/);
+export function parseCsvText(text) {
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
   const items = [];
-  
+
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    
-    const parts = trimmed.split(",");
-    if (parts.length < 2) continue;
-    
-    const itemId = parts[0].replace(/['"]/g, "").trim();
-    const qty = parseInt(parts[1].trim(), 10);
-    
-    if (itemId && !isNaN(qty)) {
-      items.push({ itemId, qty });
+
+    const parts = trimmed.split(",").map((p) => p.replace(/['"]/g, "").trim());
+    const itemId = parts[0];
+    if (!itemId) continue;
+
+    if (parts.length === 1) {
+      // Single-column list of part numbers. Part numbers never contain
+      // whitespace, so anything with a space is a header row.
+      if (/\s/.test(itemId) || /^(part|parts|item|items|product|products|sku|skus|partnumber|code)$/i.test(itemId)) continue;
+      items.push({ itemId, qty: 1 });
+    } else {
+      const qty = parseInt(parts[1], 10);
+      if (!isNaN(qty) && qty > 0) {
+        items.push({ itemId, qty });
+      }
     }
   }
   return items;
+}
+
+export async function parseCsv(filePath) {
+  return parseCsvText(await Deno.readTextFile(filePath));
 }
