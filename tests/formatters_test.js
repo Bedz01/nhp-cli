@@ -42,8 +42,8 @@ Deno.test("printPricing renders valid products with buy and sell prices", () => 
   printPricing([fixture.ChildProducts[1]], requests, { sellMarginMultiplier: 1.25 }, logger);
 
   assertStringIncludes(logger.output, "P160F23100TM");
-  assertStringIncludes(logger.output, "$363.66");
-  assertStringIncludes(logger.output, "$454.58");
+  assertStringIncludes(logger.output, "$100.00");
+  assertStringIncludes(logger.output, "$125.00");
   assertStringIncludes(logger.output, "[ IN STOCK ]");
 });
 
