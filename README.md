@@ -114,11 +114,18 @@ Run `nhp help` (or `nhp --help`) for the full built-in reference.
 **Products & Pricing**
 
 - `nhp search <query>` - Search for products matching a query.
-- `nhp price <partNumber...>` - Get price and stock info for one or more part
-  numbers.
-- `nhp csv <csvFile>` - Get price and stock for part numbers listed in a CSV
-  file. Columns: `partNumber[,qty]` - a single-column file of part numbers also
-  works (qty defaults to 1), and a header row is skipped automatically.
+- `nhp price <part>[:qty]... [--full|--tsv]` - Price and stock for one or
+  more part numbers as a ledger, one line per part: `PART  DESCRIPTION  QTY
+  BUY  [SELL]  STOCK` (description truncated to fit, `SELL` only when a
+  margin is configured, stock as glyph + NZ on-hand quantity + state; an
+  unknown part keeps its line with the portal's reason and `✗ NOT FOUND`).
+  Quantities go on the part as `K144:2 06850863:10`; `--qty <n>` is the
+  default for parts without one. A bare number is always a part number.
+  Add `--full` for the record view with discount, AU stock and the rest.
+- `nhp csv <csvFile> [--full|--tsv]` - The same for part numbers listed in a
+  CSV file. Columns: `partNumber[,qty]` - a single-column file of part
+  numbers also works (qty defaults to 1), and a header row is skipped
+  automatically.
 
 **Orders & Invoices**
 

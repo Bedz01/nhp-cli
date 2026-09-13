@@ -30,6 +30,7 @@ import {
   printInvoices,
   printOrderDetails,
   printOrders,
+  printPriceLedger,
   printPricing,
   printProducts,
   printTsv,
@@ -91,6 +92,39 @@ export function parseCartAddArgs(userArgs) {
     }
   }
   return { items };
+}
+
+// Parses `price` arguments: <part>[:qty] ... Only the explicit form sets a
+// quantity - unlike `cart add`, a bare number here is always a part number,
+// because a price check routinely takes many parts and NHP part numbers can
+// be all digits, so a second-argument heuristic would misread them. Parts
+// without a :qty get `defaultQty` (--qty).
+export function parsePartQtyArgs(userArgs, defaultQty = 1) {
+  const items = [];
+  for (const arg of userArgs) {
+    if (arg.includes(":")) {
+      const [itemId, qtyStr, ...rest] = arg.split(":");
+      if (!itemId || rest.length > 0) return { error: `Invalid item '${arg}': use <partNumber>:<qty>.` };
+      if (!/^[1-9]\d*$/.test(qtyStr || "")) return { error: `Invalid quantity in '${arg}'. Use <partNumber>:<qty> with a positive whole number.` };
+      items.push({ itemId, qty: parseInt(qtyStr, 10) });
+    } else {
+      items.push({ itemId: arg, qty: defaultQty });
+    }
+  }
+  return { items };
+}
+
+function describeItems(items) {
+  return items.map((i) => (i.qty === 1 ? i.itemId : `${i.itemId} x${i.qty}`)).join(", ");
+}
+
+// price/csv output: the ledger is the default, --full restores the record
+// view, --tsv exports; --json has already printed and wants nothing else.
+function printPriceResults(products, productItems, options, config, logger) {
+  if (options.tsv) printTsv(PRICE_TSV_COLUMNS, priceTsvRows(products, productItems, config), logger);
+  else if (logger.isJson) return;
+  else if (options.full) printPricing(products, productItems, config, logger);
+  else printPriceLedger(products, productItems, config, logger);
 }
 
 // Credentials for the client, resolved only when a login is actually needed:
@@ -179,23 +213,27 @@ async function handleSearch(client, args, logger) {
   }
 }
 
-async function handlePrice(client, items, options, config, logger) {
-  if (items.length === 0) {
+async function handlePrice(client, args, options, config, logger) {
+  const defaultQty = parseInt(options.qty || "1", 10);
+  if (isNaN(defaultQty) || defaultQty < 1) {
+    logger.error("Please specify a valid --qty (positive whole number).");
+    Deno.exit(1);
+  }
+  const { items: productItems, error } = parsePartQtyArgs(args, defaultQty);
+  if (error) {
+    logger.error(error);
+    Deno.exit(1);
+  }
+  if (productItems.length === 0) {
     logger.error("Please specify at least one part number.");
     Deno.exit(1);
   }
-  logger.log(`Fetching price and stock for: ${items.join(", ")}...`);
+  logger.log(`Fetching price and stock for: ${describeItems(productItems)}...`);
 
-  const productItems = items.map((itemId) => ({ itemId: String(itemId), qty: 1 }));
   const results = await client.getPriceAndStock(productItems);
 
   logger.json(results);
-
-  if (options.tsv) {
-    printTsv(PRICE_TSV_COLUMNS, priceTsvRows(results?.ChildProducts || [], productItems, config), logger);
-  } else if (!logger.isJson) {
-    printPricing(results?.ChildProducts || [], productItems, config, logger);
-  }
+  printPriceResults(results?.ChildProducts || [], productItems, options, config, logger);
 }
 
 async function handleCsv(client, csvFile, options, config, logger) {
@@ -229,12 +267,7 @@ async function handleCsv(client, csvFile, options, config, logger) {
   }
 
   logger.json(allResults);
-
-  if (options.tsv) {
-    printTsv(PRICE_TSV_COLUMNS, priceTsvRows(allResults, products, config), logger);
-  } else if (!logger.isJson) {
-    printPricing(allResults, products, config, logger);
-  }
+  printPriceResults(allResults, products, options, config, logger);
 }
 
 async function handleOrders(client, offsetStr, options, logger) {
@@ -565,9 +598,10 @@ Usage:
 
 Products & Pricing:
   search <query>              Search for products
-  price <partNumber...> [--tsv]
+  price <part>[:qty]... [--full|--tsv]
                               Price and stock for one or more part numbers
-  csv <file> [--tsv]          Price and stock for part numbers in a CSV file
+                              (ledger by default, e.g. K144:2 06850863:10)
+  csv <file> [--full|--tsv]   Price and stock for part numbers in a CSV file
                               (columns: partNumber[,qty] - qty defaults to 1)
 
 Orders & Invoices:
@@ -601,8 +635,9 @@ Options:
   --json                      Print the raw API response as JSON on stdout
   --verbose                   Show debug output (auth flow, etc.)
   --brief                     One-line ledger output for invoices/invoice
-                              (already the default for orders/order/po)
-  --full                      Record view for orders/order/po
+                              (already the default for price/csv/orders/order/po)
+  --full                      Record view for price/csv/orders/order/po
+  --qty <n>                   Default quantity for price (parts without :qty)
   --tsv                       Tab-separated table for price/csv/orders/order/
                               invoices/invoice/po (pipe to Set-Clipboard / clip
                               and paste into a spreadsheet)
@@ -630,7 +665,7 @@ if (import.meta.main) {
     boolean: ["json", "verbose", "brief", "full", "tsv", "reset", "help", "version"],
     // "_" keeps positional args as strings - otherwise numeric part numbers
     // like 06850863 get coerced to numbers and lose their leading zeros
-    string: ["_", "dateFrom", "dateTo", "purchaseNumber", "documentNumber", "orderNumber", "customerReference"],
+    string: ["_", "qty", "dateFrom", "dateTo", "purchaseNumber", "documentNumber", "orderNumber", "customerReference"],
     alias: { h: "help" },
     unknown: (arg) => {
       if (arg.startsWith("-")) unknownFlags.push(arg);

@@ -81,6 +81,51 @@ function getStatusColor(statusStr) {
   return cyan;
 }
 
+// The price ledger (the default view for price/csv): one line per part - the
+// description truncated to its column so nothing wraps, then the requested
+// quantity, buy price, sell price when a margin is configured, and the NZ
+// stock as glyph + on-hand quantity + state. An unknown part keeps its line,
+// with the portal's reason in the description column and NOT FOUND under
+// STOCK, so the rows still line up with what was asked for.
+export function printPriceLedger(results, originalRequests = [], config = {}, logger) {
+  if (!results || results.length === 0) {
+    logger.log(yellow(`No pricing results returned.`));
+    return;
+  }
+  const hasMargin = config.sellMarginMultiplier !== null && config.sellMarginMultiplier !== undefined;
+  const header = [padText("PART", 26), padText("DESCRIPTION", BRIEF_DESC_WIDTH), padText("QTY", 5), padText("BUY", 14)];
+  if (hasMargin) header.push(padText("SELL", 12));
+  header.push("STOCK");
+  logger.log(dim(header.join(" ")));
+
+  for (const prod of results) {
+    const orig = originalRequests.find((p) => p.itemId.toLowerCase() === (prod.ProductId || '').toLowerCase());
+    const qty = padText(String(orig ? orig.qty : 1), 5);
+    const code = padText(cyan(truncateText(prod.ProductId || 'Unknown', 26)), 26);
+
+    if (prod.HasError || prod.ProductExist === false) {
+      const reason = prod.ErrorMessages?.length ? prod.ErrorMessages.join("; ") : "Item not recognised.";
+      const cells = [code, padText(red(truncateText(reason, BRIEF_DESC_WIDTH)), BRIEF_DESC_WIDTH), qty, padText('', 14)];
+      if (hasMargin) cells.push(padText('', 12));
+      cells.push(red(`${statusGlyph(red)} NOT FOUND`));
+      logger.log(cells.join(" "));
+      continue;
+    }
+
+    const desc = padText(truncateText(prod.Description || prod.DisplayName || 'N/A', BRIEF_DESC_WIDTH), BRIEF_DESC_WIDTH);
+    const buyPrice = prod.AdjustedPriceWithCurrency || (prod.NetPrice != null ? `$${prod.NetPrice}` : 'N/A');
+    const cells = [code, desc, qty, padText(green(buyPrice), 14)];
+    if (hasMargin) {
+      const sellNum = parseFloat(buyPrice.replace(/[^0-9.]/g, '')) * config.sellMarginMultiplier;
+      cells.push(padText(isNaN(sellNum) ? dim('N/A') : yellow(`$${sellNum.toFixed(2)}`), 12));
+    }
+    const nzStock = parseInt(prod.OnHandQty, 10) || 0;
+    const stockColor = nzStock > 0 ? green : red;
+    cells.push(stockColor(`${statusGlyph(stockColor)} ${nzStock} ${nzStock > 0 ? 'IN STOCK' : 'OUT OF STOCK'}`));
+    logger.log(cells.join(" "));
+  }
+}
+
 // Ledger-style state glyph matching the status color.
 function statusGlyph(color) {
   if (color === green) return "●";
