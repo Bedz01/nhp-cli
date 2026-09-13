@@ -66,21 +66,30 @@ function getStatusColor(statusStr) {
   return cyan;
 }
 
+// Ledger-style state glyph matching the status color.
+function statusGlyph(color) {
+  if (color === green) return "●";
+  if (color === yellow) return "◐";
+  if (color === red) return "✗";
+  return "○";
+}
+
 export function printOrders(orders, logger, brief = false) {
   if (!orders || orders.length === 0) {
     logger.log(yellow(`No orders found.`));
     return;
   }
   if (!brief) logger.log(`\n${bold(cyan("======================= ORDERS ======================="))}`);
+  else logger.log(dim(`${padText("ORDER", 15)} ${padText("PO", 25)} ${padText("STATUS", 24)} DATE`));
   for (const order of orders) {
     const status = order.OrderStatus || order.Status || '';
     const statusColor = getStatusColor(status);
-    
+
     if (brief) {
       const orderId = padText(cyan(order.OrderId || order.OrderID || ''), 15);
-      const dateStr = padText(order.OrderDate || 'Unknown', 12);
       const poStr = padText(yellow(order.PurchaseNumber || 'N/A'), 25);
-      logger.log(`${orderId} | ${dateStr} | ${poStr} | ${statusColor(status)}`);
+      const statusStr = padText(statusColor(`${statusGlyph(statusColor)} ${status}`), 24);
+      logger.log(`${orderId} ${poStr} ${statusStr} ${dim(order.OrderDate || 'Unknown')}`);
     } else {
       logger.log(` ${bold(blue("•"))} ${bold("Order ID:")} ${cyan(order.OrderId || order.OrderID)}`);
       logger.log(`   ${bold("PO:")}       ${yellow(order.PurchaseNumber || 'N/A')}`);
@@ -98,15 +107,16 @@ export function printInvoices(invoices, logger, brief = false) {
     return;
   }
   if (!brief) logger.log(`\n${bold(cyan("======================= INVOICES ======================="))}`);
+  else logger.log(dim(`${padText("INVOICE", 15)} ${padText("PO", 25)} ${padText("STATUS", 24)} DATE`));
   for (const inv of invoices) {
     const status = inv.OrderStatus || inv.Status || '';
     const statusColor = getStatusColor(status);
-    
+
     if (brief) {
       const invId = padText(cyan(inv.DocumentNumber || ''), 15);
-      const dateStr = padText(inv.InvoiceDate || 'Unknown', 12);
       const poStr = padText(yellow(inv.PurchaseNumber || 'N/A'), 25);
-      logger.log(`${invId} | ${dateStr} | ${poStr} | ${statusColor(status)}`);
+      const statusStr = padText(statusColor(`${statusGlyph(statusColor)} ${status}`), 24);
+      logger.log(`${invId} ${poStr} ${statusStr} ${dim(inv.InvoiceDate || 'Unknown')}`);
     } else {
       logger.log(` ${bold(blue("•"))} ${bold("Invoice No:")} ${cyan(inv.DocumentNumber)}`);
       logger.log(`   ${bold("PO Number:")}  ${inv.PurchaseNumber || 'N/A'} ${dim(`(${inv.CustomerReference || 'No Ref'})`)}`);
@@ -283,9 +293,10 @@ export function printBriefItems(data, logger) {
     logger.log(` ${dim("PO:")} ${yellow(po)} ${dim("| Ref:")} ${yellow(ref)} ${dim("| Date:")} ${yellow(date)}`);
   }
 
+  logger.log(dim(`${padText("PART", 26)} QTY`));
   for (const item of items) {
-    const code = padText(item.ProductCode || 'Unknown', 25);
-    logger.log(` ${bold(blue("•"))} ${cyan(code)} ${dim("Qty:")} ${green(bold(String(item.Quantity || 0)))}`);
+    const code = padText(cyan(item.ProductCode || 'Unknown'), 26);
+    logger.log(`${code} ${green(bold(String(item.Quantity || 0)))}`);
   }
 }
 
