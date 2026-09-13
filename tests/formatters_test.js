@@ -1,6 +1,6 @@
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@^1";
 import { stripAnsiCode } from "jsr:@std/fmt@^1/colors";
-import { printBriefItems, printOrderDetails, printPricing } from "../formatters.js";
+import { formatDate, INVOICE_ITEM_TSV_COLUMNS, INVOICE_LIST_TSV_COLUMNS, invoiceItemTsvRows, invoiceListTsvRows, ORDER_ITEM_TSV_COLUMNS, ORDER_LIST_TSV_COLUMNS, orderItemTsvRows, orderListTsvRows, PRICE_TSV_COLUMNS, priceTsvRows, printBriefItems, printOrderDetails, printPricing, printTsv } from "../formatters.js";
 import fixture from "./fixtures/pricing_response.json" with { type: "json" };
 
 class TestLogger {
@@ -19,6 +19,9 @@ class TestLogger {
   }
   debug() {}
   json() {}
+  tsv(line) {
+    this.lines.push(line);
+  }
   get output() {
     return this.lines.join("\n");
   }
@@ -176,4 +179,100 @@ Deno.test("printBriefItems labels an invoice id and prints it without a scraped 
 
   assertStringIncludes(logger.lines[0], "Invoice: 0087654321");
   assert(!logger.output.includes("undefined"), "should not print 'undefined'");
+});
+
+Deno.test("order --tsv: one header row then one tab-separated row per item, money and quantities bare", () => {
+  const logger = new TestLogger();
+  const longDesc = "MODULAR Key Lock Type 144 with an unreasonably long marketing description attached";
+  const data = {
+    header: { "Purchase order number": "1234/J001", "Order Created on": "2026-07-01", "Status": "Partially Shipped" },
+    addresses: {},
+    items: [
+      { ProductCode: "K144", Description: longDesc, UnitPrice: "$1,010.00", Quantity: "5", RemainingQuantity: "2", UOM: "EA", Status: "Partially Shipped", Total: "$5,050.00" },
+      { ProductCode: "06850863", Description: "Tabs\tand\nnewlines", UnitPrice: "$1.00", Quantity: "3", RemainingQuantity: "3", UOM: "EA", Status: "Not Shipped", Total: "$3.00" },
+    ],
+  };
+  printTsv(ORDER_ITEM_TSV_COLUMNS, orderItemTsvRows(data, "54321"), logger);
+
+  const [hdr, row1, row2] = logger.lines;
+  assertEquals(logger.lines.length, 3);
+  assertEquals(hdr, ORDER_ITEM_TSV_COLUMNS.join("\t"));
+  for (const line of logger.lines) assertEquals(line.split("\t").length, ORDER_ITEM_TSV_COLUMNS.length, `cell count: ${line}`);
+  assertEquals(row1.split("\t"), ["54321", "1234/J001", "Partially Shipped", "01/07/2026", "1", "K144", longDesc, "3", "5", "Partially Shipped", "1010", "5050"]);
+  assertEquals(row2.split("\t"), ["54321", "1234/J001", "Partially Shipped", "01/07/2026", "2", "06850863", "Tabs and newlines", "0", "3", "Not Shipped", "1", "3"]);
+  assert(!/[●◐✗○…$]/.test(logger.output), "no glyphs, ellipses, or currency symbols in the export");
+});
+
+Deno.test("orders --tsv and invoices --tsv: one row per record from the list fields", () => {
+  const orders = new TestLogger();
+  printTsv(ORDER_LIST_TSV_COLUMNS, orderListTsvRows([{ OrderId: "54321", PurchaseNumber: "1234/J001", OrderStatus: "Invoiced", OrderDate: "2026-07-01", TotalText: "$5,053.00" }]), orders);
+  assertEquals(orders.lines, ["ORDER\tPO\tSTATUS\tDATE\tTOTAL", "54321\t1234/J001\tInvoiced\t01/07/2026\t5053"]);
+
+  const invoices = new TestLogger();
+  printTsv(INVOICE_LIST_TSV_COLUMNS, invoiceListTsvRows([{ DocumentNumber: "INV1", PurchaseNumber: "1234/J001", CustomerReference: "Example Site", Status: "Paid", InvoiceDate: "2026-07-03", TotalText: "$5,053.00", OutstandingText: "$0.00" }]), invoices);
+  assertEquals(invoices.lines, ["INVOICE\tPO\tREF\tSTATUS\tDATE\tTOTAL\tOUTSTANDING", "INV1\t1234/J001\tExample Site\tPaid\t03/07/2026\t5053\t0"]);
+});
+
+Deno.test("invoice --tsv: one row per invoice line with QTY, no shipping columns", () => {
+  const logger = new TestLogger();
+  const data = {
+    header: { "Purchase order number": "1234/J001", "Customer Reference": "Example Site", "Invoice Date": "2026-07-03" },
+    items: [{ ProductCode: "K144", Description: "Key", UnitPrice: "$10.00", Quantity: "5", Total: "$50.00" }],
+  };
+  printTsv(INVOICE_ITEM_TSV_COLUMNS, invoiceItemTsvRows(data, "INV1"), logger);
+  assertEquals(logger.lines, ["INVOICE\tPO\tREF\tDATE\tLINE\tPART\tDESCRIPTION\tQTY\tUNIT PRICE\tTOTAL", "INV1\t1234/J001\tExample Site\t03/07/2026\t1\tK144\tKey\t5\t10\t50"]);
+});
+
+Deno.test("price --tsv: bare numbers, sell from the margin, NZ stock, and an ERROR row for unknown parts", () => {
+  const logger = new TestLogger();
+  const requests = [{ itemId: "PGT8710", qty: 2 }, { itemId: "P160F23100TM", qty: 1 }];
+  printTsv(PRICE_TSV_COLUMNS, priceTsvRows(fixture.ChildProducts, requests, { sellMarginMultiplier: 1.25 }), logger);
+
+  assertEquals(logger.lines.length, 3);
+  assertEquals(logger.lines[0], "PART\tDESCRIPTION\tQTY\tBUY\tSELL\tLIST\tCURRENCY\tSTOCK\tSTOCK STATUS\tERROR");
+  const [, unknown, known] = logger.lines;
+  const u = unknown.split("\t");
+  assertEquals(u[0], "PGT8710");
+  assertEquals(u[2], "2");
+  assertStringIncludes(u[9], "Item not recognised");
+  assertEquals(known.split("\t"), ["P160F23100TM", "Terasaki TemBreak PRO MCCB 160 Frame 36kA 3P 100A Adj. Therm. Adj. Mag.", "1", "100", "125", "", "NZD", "6", "IN STOCK", ""]);
+
+  const plain = new TestLogger();
+  printTsv(PRICE_TSV_COLUMNS, priceTsvRows([fixture.ChildProducts[1]], requests, {}), plain);
+  assertEquals(plain.lines[1].split("\t")[4], "", "no margin configured -> SELL blank");
+});
+
+// Regression: the live invoice page labels its header "Invoice date" (lower-case
+// d) and "Customer Reference no"; the order page uses "Order Created on" and
+// the same "Customer Reference no". Both the ledger summary and the exports
+// must pick those up rather than printing Unknown / blank.
+Deno.test("scraped header labels: 'Invoice date' and 'Customer Reference no' are recognised", () => {
+  const data = {
+    header: { "Document no": "SIN1", "Invoice date": "4/09/2026", "Purchase order number": "1234/J001", "Customer Reference no": "Example Site" },
+    items: [{ ProductCode: "DOORLATCH", Description: "DOOR LATCH STANDARD", UnitPrice: "$6.00", Quantity: "30", Total: "$180.00" }],
+  };
+  const tsv = new TestLogger();
+  printTsv(INVOICE_ITEM_TSV_COLUMNS, invoiceItemTsvRows(data, "SIN1"), tsv);
+  assertEquals(tsv.lines[1].split("\t").slice(0, 4), ["SIN1", "1234/J001", "Example Site", "04/09/2026"]);
+
+  const ledger = new TestLogger();
+  printBriefItems(data, ledger, "SIN1", "Invoice");
+  assertStringIncludes(ledger.lines[0], "Ref: Example Site");
+  assertStringIncludes(ledger.lines[0], "Date: 04/09/2026");
+});
+
+Deno.test("formatDate renders every date as dd/mm/yyyy and passes non-dates through", () => {
+  assertEquals(formatDate("3/09/2026"), "03/09/2026");
+  assertEquals(formatDate("28/08/2026"), "28/08/2026");
+  assertEquals(formatDate("2026-07-01T00:00:00Z"), "01/07/2026");
+  assertEquals(formatDate(""), "");
+  assertEquals(formatDate(undefined), "");
+  assertEquals(formatDate("Not a date"), "Not a date");
+});
+
+Deno.test("printOrderDetails header grid normalises scraped dates", () => {
+  const logger = new TestLogger();
+  printOrderDetails({ header: { "Order No": "SOR1", "Order Created on": "3/09/2026", "Status": "Invoiced" }, addresses: {}, items: [] }, "SOR1", logger);
+  assertStringIncludes(logger.output, "03/09/2026");
+  assert(!logger.output.includes(" 3/09/2026"), "unpadded portal date must not leak through");
 });

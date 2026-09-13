@@ -64,14 +64,14 @@ Run `nhp help` (or `nhp --help`) for the full built-in reference.
 
 **Orders & Invoices**
 
-- `nhp orders [offset] [--full]` - Get order history as a compact ledger
+- `nhp orders [offset] [--full|--tsv]` - Get order history as a compact ledger
   (`ORDER  PO  STATUS  DATE`, one line per order). Add `--full` for the
   record view with totals. Optional search flags: `--dateFrom`, `--dateTo`,
   `--purchaseNumber`, `--documentNumber`, `--orderNumber`,
   `--customerReference`.
-- `nhp invoices [offset] [--brief]` - Get invoice history. Accepts the same
+- `nhp invoices [offset] [--brief|--tsv]` - Get invoice history. Accepts the same
   optional search flags as orders. Add `--brief` for the ledger view.
-- `nhp order <orderId...> [--full]` - Line items for one or more orders as a
+- `nhp order <orderId...> [--full|--tsv]` - Line items for one or more orders as a
   ledger, one line per item: `PART  DESCRIPTION  DLV/ORD  STATUS`
   (description truncated to fit, delivered/ordered quantity coloured
   green/yellow/red). Several order IDs are fetched one at a time (each is a
@@ -82,7 +82,7 @@ Run `nhp help` (or `nhp --help`) for the full built-in reference.
   failure becoming `{ orderId, error }`); a single ID keeps the bare scrape
   result. Add `--full` for the record view with header, addresses, prices and
   totals.
-- `nhp invoice <id> [--brief]` - Get detailed line items for a specific invoice.
+- `nhp invoice <id> [--brief|--tsv]` - Get detailed line items for a specific invoice.
   `--brief` prints `PART  DESCRIPTION  QTY`.
 - `nhp po <query>` - Search order history by PO Number. A single match
   auto-expands like `nhp order` (ledger, or record view with `--full`).
@@ -108,6 +108,40 @@ Run `nhp help` (or `nhp --help`) for the full built-in reference.
 
 - `nhp login` - Force login and refresh cookies.
 
+### Spreadsheet Export (`--tsv`)
+
+`price`, `csv`, `orders`, `order`, `invoices`, `invoice` and `po` take
+`--tsv`: one header row and one tab-separated row per record (per line item
+for `order`/`invoice`, across every order given), with the order- or
+invoice-level fields repeated on each row so the result is a flat table.
+Plain text only - no colour, glyphs, truncation, or progress line; money and
+quantities are bare numbers parsed out of the portal's `$1,234.56` strings -
+so it pastes straight into columns:
+
+```powershell
+nhp order SOR1000001 SOR1000002 --tsv | Set-Clipboard        # then paste into Excel/Sheets
+nhp invoices --dateFrom 2026-07-01 --tsv | Set-Clipboard
+nhp price K144 06850863 --tsv | ConvertFrom-Csv -Delimiter "`t"   # PowerShell objects
+```
+
+Columns (blank where NHP has no such value):
+
+```
+price/csv   PART  DESCRIPTION  QTY  BUY  SELL  LIST  CURRENCY  STOCK  STOCK STATUS  ERROR
+orders      ORDER  PO  STATUS  DATE  TOTAL
+order       ORDER  PO  ORDER STATUS  DATE  LINE  PART  DESCRIPTION  DELIVERED  ORDERED  LINE STATUS  UNIT PRICE  TOTAL
+invoices    INVOICE  PO  REF  STATUS  DATE  TOTAL  OUTSTANDING
+invoice     INVOICE  PO  REF  DATE  LINE  PART  DESCRIPTION  QTY  UNIT PRICE  TOTAL
+```
+
+`STOCK` is the NZ on-hand quantity and `STOCK STATUS` the badge text; `LIST`
+is always blank (the portal has no list price) and `CURRENCY` always `NZD`;
+`SELL` is filled only when `sellMarginMultiplier` is configured; `LINE` is the
+1-based position (the portal has no line numbers). Dates are `dd/mm/yyyy` as
+in every other view. Failures behave as in the human view (stderr, non-zero
+exit) and contribute no rows. `--tsv` wins over `--full`/`--brief`, `--json`
+wins over both.
+
 ### JSON Output & Exit Codes
 
 You can append `--json` to any command to receive the raw JSON response on
@@ -120,6 +154,17 @@ nhp orders 0 --purchaseNumber PO-12345 --json > orders.json
 
 Failed operations (unknown part numbers on `cart add`, items not found, API
 errors) exit with a non-zero status code, so the CLI is safe to script against.
+
+### Portal Quirks
+
+- **Header labels differ between the order and invoice pages, including
+  capitalisation.** The order page says `Order Created on` and `Customer
+  Reference no`; the invoice page says `Invoice date` (lower-case d) and the
+  same `Customer Reference no`. The ledger summary line and the `--tsv`
+  exports look the labels up through one shared fallback list in
+  `formatters.js`; add new spellings there, not at the call sites.
+- **Portal dates are unpadded `d/M/yyyy`** (`3/09/2026`, day first). Every
+  printed date goes through `formatDate`, which zero-pads to `dd/mm/yyyy`.
 
 ---
 

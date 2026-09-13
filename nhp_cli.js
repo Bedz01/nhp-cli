@@ -1,6 +1,26 @@
 import { NHPClient } from "./api.js";
 import { loadConfig, parseCsv } from "./config.js";
-import { printProducts, printPricing, printOrders, printOrderDetails, printInvoices, printInvoiceDetails, printBriefItems, printCart } from "./formatters.js";
+import {
+  INVOICE_ITEM_TSV_COLUMNS,
+  INVOICE_LIST_TSV_COLUMNS,
+  invoiceItemTsvRows,
+  invoiceListTsvRows,
+  ORDER_ITEM_TSV_COLUMNS,
+  ORDER_LIST_TSV_COLUMNS,
+  orderItemTsvRows,
+  orderListTsvRows,
+  PRICE_TSV_COLUMNS,
+  priceTsvRows,
+  printBriefItems,
+  printCart,
+  printInvoiceDetails,
+  printInvoices,
+  printOrderDetails,
+  printOrders,
+  printPricing,
+  printProducts,
+  printTsv,
+} from "./formatters.js";
 import { parseArgs } from "jsr:@std/cli@^1/parse-args";
 import { Logger } from "./logger.js";
 import denoConfig from "./deno.json" with { type: "json" };
@@ -83,7 +103,7 @@ async function handleSearch(client, args, logger) {
   }
 }
 
-async function handlePrice(client, items, config, logger) {
+async function handlePrice(client, items, options, config, logger) {
   if (items.length === 0) {
     logger.error("Please specify at least one part number.");
     Deno.exit(1);
@@ -95,12 +115,14 @@ async function handlePrice(client, items, config, logger) {
 
   logger.json(results);
 
-  if (!logger.isJson) {
+  if (options.tsv) {
+    printTsv(PRICE_TSV_COLUMNS, priceTsvRows(results?.ChildProducts || [], productItems, config), logger);
+  } else if (!logger.isJson) {
     printPricing(results?.ChildProducts || [], productItems, config, logger);
   }
 }
 
-async function handleCsv(client, csvFile, config, logger) {
+async function handleCsv(client, csvFile, options, config, logger) {
   if (!csvFile) {
     logger.error("Please specify a CSV file path.");
     Deno.exit(1);
@@ -132,7 +154,9 @@ async function handleCsv(client, csvFile, config, logger) {
 
   logger.json(allResults);
 
-  if (!logger.isJson) {
+  if (options.tsv) {
+    printTsv(PRICE_TSV_COLUMNS, priceTsvRows(allResults, products, config), logger);
+  } else if (!logger.isJson) {
     printPricing(allResults, products, config, logger);
   }
 }
@@ -145,7 +169,9 @@ async function handleOrders(client, offsetStr, options, logger) {
 
   logger.json(results);
 
-  if (!logger.isJson) {
+  if (options.tsv) {
+    printTsv(ORDER_LIST_TSV_COLUMNS, orderListTsvRows(results?.NhpOrders || []), logger);
+  } else if (!logger.isJson) {
     // The ledger view is the default for order lists; --full restores the record view.
     printOrders(results?.NhpOrders || [], logger, !options.full);
   }
@@ -159,7 +185,9 @@ async function handleInvoices(client, offsetStr, options, logger) {
 
   logger.json(results);
 
-  if (!logger.isJson) {
+  if (options.tsv) {
+    printTsv(INVOICE_LIST_TSV_COLUMNS, invoiceListTsvRows(results?.NhpInvoices || []), logger);
+  } else if (!logger.isJson) {
     printInvoices(results?.NhpInvoices || [], logger, options.brief);
   }
 }
@@ -170,7 +198,10 @@ async function handleOrderDetails(client, orderIds, options, logger) {
     Deno.exit(1);
   }
 
-  // The item ledger is the default; --full restores the header/address/item record view.
+  // The item ledger is the default; --full restores the header/address/item
+  // record view; --tsv is the spreadsheet export and wins over --full (the
+  // logger mutes the progress line in that mode).
+  const tsv = !!options?.tsv;
   const brief = !options?.full;
   if (!brief) {
     const what = orderIds.length === 1 ? `order: ${orderIds[0]}` : `${orderIds.length} orders`;
@@ -209,17 +240,21 @@ async function handleOrderDetails(client, orderIds, options, logger) {
       if (error) {
         logger.error(`Error fetching order ${orderId}:`, error.message);
         failed = true;
-      } else if (brief) {
-        if (data?.items?.length) {
-          printBriefItems(data, logger, orderId);
-        } else {
+      } else if (brief || tsv) {
+        if (!data?.items?.length) {
           logger.error(`No items found for order ${orderId}. The order may not exist.`);
           failed = true;
+        } else if (!tsv) {
+          printBriefItems(data, logger, orderId);
         }
       } else {
         printOrderDetails(data, orderId, logger);
       }
     });
+    if (tsv) {
+      const rows = results.filter((r) => !r.error).flatMap((r) => orderItemTsvRows(r.data, r.orderId));
+      printTsv(ORDER_ITEM_TSV_COLUMNS, rows, logger);
+    }
   }
 
   if (failed || results.some((r) => r.error)) Deno.exit(1);
@@ -238,12 +273,14 @@ async function handleInvoiceDetails(client, invoiceId, options, logger) {
   logger.json(data);
 
   if (!logger.isJson) {
-    if (brief) {
-      if (data?.items?.length) {
-        printBriefItems(data, logger, invoiceId, "Invoice");
-      } else {
+    if (brief || options?.tsv) {
+      if (!data?.items?.length) {
         logger.error(`No items found for invoice ${invoiceId}. The invoice may not exist.`);
         Deno.exit(1);
+      } else if (options?.tsv) {
+        printTsv(INVOICE_ITEM_TSV_COLUMNS, invoiceItemTsvRows(data, invoiceId), logger);
+      } else {
+        printBriefItems(data, logger, invoiceId, "Invoice");
       }
     } else {
       printInvoiceDetails(data, invoiceId, logger);
@@ -267,14 +304,19 @@ async function handlePo(client, args, options, logger) {
 
   if (!logger.isJson) {
     if (matchedOrders.length === 0) {
-      logger.log(`No orders found matching PO "${query}".`);
+      // --tsv still gets a well-formed (header-only) table, like an empty order.
+      if (options?.tsv) printTsv(ORDER_LIST_TSV_COLUMNS, [], logger);
+      else logger.log(`No orders found matching PO "${query}".`);
     } else if (matchedOrders.length === 1) {
       const orderId = matchedOrders[0].OrderId || matchedOrders[0].OrderID;
       logger.log(`Found exactly 1 match (Order: ${orderId}). Fetching details...`);
       const data = await client.getOrderDetails(orderId);
-      // Same default as `order <id>`: ledger unless --full.
-      if (options?.full) printOrderDetails(data, orderId, logger);
+      // Same defaults as `order <id>`: ledger unless --full; --tsv exports.
+      if (options?.tsv) printTsv(ORDER_ITEM_TSV_COLUMNS, orderItemTsvRows(data, orderId), logger);
+      else if (options?.full) printOrderDetails(data, orderId, logger);
       else printBriefItems(data, logger, orderId);
+    } else if (options?.tsv) {
+      printTsv(ORDER_LIST_TSV_COLUMNS, orderListTsvRows(matchedOrders), logger);
     } else {
       logger.log(`\nFound ${matchedOrders.length} matching orders:`);
       printOrders(matchedOrders, logger, true);
@@ -447,16 +489,21 @@ Usage:
 
 Products & Pricing:
   search <query>              Search for products
-  price <partNumber...>       Price and stock for one or more part numbers
-  csv <file>                  Price and stock for part numbers in a CSV file
+  price <partNumber...> [--tsv]
+                              Price and stock for one or more part numbers
+  csv <file> [--tsv]          Price and stock for part numbers in a CSV file
                               (columns: partNumber[,qty] - qty defaults to 1)
 
 Orders & Invoices:
-  orders [offset] [--full]    Order history (20 per page, ledger by default)
-  invoices [offset] [--brief] Invoice history (20 per page)
-  order <orderId...> [--full] Line items and shipping status for one or more orders (ledger by default)
-  invoice <id> [--brief]      Line items for an invoice
-  po <query>                  Search order history by PO number
+  orders [offset] [--full|--tsv]
+                              Order history (20 per page, ledger by default)
+  invoices [offset] [--brief|--tsv]
+                              Invoice history (20 per page)
+  order <orderId...> [--full|--tsv]
+                              Line items and shipping status for one or more orders (ledger by default)
+  invoice <id> [--brief|--tsv]
+                              Line items for an invoice
+  po <query> [--full|--tsv]   Search order history by PO number
 
 Cart:
   cart add <part> [qty]       Add a part to the cart (qty 1-9999)
@@ -476,6 +523,9 @@ Options:
   --brief                     One-line ledger output for invoices/invoice
                               (already the default for orders/order/po)
   --full                      Record view for orders/order/po
+  --tsv                       Tab-separated table for price/csv/orders/order/
+                              invoices/invoice/po (pipe to Set-Clipboard / clip
+                              and paste into a spreadsheet)
   --dateFrom, --dateTo, --purchaseNumber, --documentNumber,
   --orderNumber, --customerReference
                               Search filters for orders/invoices
@@ -490,7 +540,7 @@ if (import.meta.main) {
 
   const unknownFlags = [];
   const parsedArgs = parseArgs(Deno.args, {
-    boolean: ["json", "verbose", "brief", "full", "help", "version"],
+    boolean: ["json", "verbose", "brief", "full", "tsv", "help", "version"],
     // "_" keeps positional args as strings - otherwise numeric part numbers
     // like 06850863 get coerced to numbers and lose their leading zeros
     string: ["_", "dateFrom", "dateTo", "purchaseNumber", "documentNumber", "orderNumber", "customerReference"],
@@ -504,7 +554,7 @@ if (import.meta.main) {
   const { _, json: isJsonMode, verbose, help, h: _h, version, ...options } = parsedArgs;
   const args = _.map(String);
 
-  const logger = new Logger({ isJson: isJsonMode, verbose: verbose });
+  const logger = new Logger({ isJson: isJsonMode, isTsv: options.tsv, verbose: verbose });
 
   if (unknownFlags.length > 0) {
     logger.error(`Unknown flag(s): ${unknownFlags.join(", ")}. Run 'nhp help' for usage.`);
@@ -523,7 +573,7 @@ if (import.meta.main) {
 
   const cmd = args[0];
   const client = new NHPClient({
-    silent: isJsonMode,
+    silent: isJsonMode || options.tsv,
     logger: logger,
     ...config,
   });
@@ -537,10 +587,10 @@ if (import.meta.main) {
         await handleSearch(client, args.slice(1), logger);
         break;
       case "price":
-        await handlePrice(client, args.slice(1), config, logger);
+        await handlePrice(client, args.slice(1), options, config, logger);
         break;
       case "csv":
-        await handleCsv(client, args[1], config, logger);
+        await handleCsv(client, args[1], options, config, logger);
         break;
       case "orders":
         await handleOrders(client, args[1], options, logger);

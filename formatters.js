@@ -1,5 +1,20 @@
 import { blue, bold, cyan, dim, green, magenta, red, stripAnsiCode, yellow } from "jsr:@std/fmt@^1/colors";
 
+// Every printed date is dd/mm/yyyy (NZ locale). The
+// portal gives d/M/yyyy without zero padding ("3/09/2026", day first - the
+// 28/08/2026 entries prove the order); ISO is accepted too. Anything that
+// isn't a date passes through unchanged, so this is safe to run over every
+// scraped header value.
+export function formatDate(value) {
+  if (!value) return '';
+  const s = String(value);
+  const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (dmy) return `${dmy[1].padStart(2, '0')}/${dmy[2].padStart(2, '0')}/${dmy[3]}`;
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
+  return s;
+}
+
 export function printProducts(products, logger) {
   if (!products || products.length === 0) {
     logger.log(yellow(`No products found.`));
@@ -89,11 +104,11 @@ export function printOrders(orders, logger, brief = false) {
       const orderId = padText(cyan(order.OrderId || order.OrderID || ''), 15);
       const poStr = padText(yellow(order.PurchaseNumber || 'N/A'), 25);
       const statusStr = padText(statusColor(`${statusGlyph(statusColor)} ${status}`), 24);
-      logger.log(`${orderId} ${poStr} ${statusStr} ${dim(order.OrderDate || 'Unknown')}`);
+      logger.log(`${orderId} ${poStr} ${statusStr} ${dim(formatDate(order.OrderDate) || 'Unknown')}`);
     } else {
       logger.log(` ${bold(blue("•"))} ${bold("Order ID:")} ${cyan(order.OrderId || order.OrderID)}`);
       logger.log(`   ${bold("PO:")}       ${yellow(order.PurchaseNumber || 'N/A')}`);
-      logger.log(`   ${bold("Date:")}     ${order.OrderDate || 'Unknown'}`);
+      logger.log(`   ${bold("Date:")}     ${formatDate(order.OrderDate) || 'Unknown'}`);
       logger.log(`   ${bold("Total:")}    ${green(order.TotalText || order.Total || '$0.00')}`);
       logger.log(`   ${bold("Status:")}   ${statusColor(status)}`);
       logger.log(dim(`------------------------------------------------------`));
@@ -116,11 +131,11 @@ export function printInvoices(invoices, logger, brief = false) {
       const invId = padText(cyan(inv.DocumentNumber || ''), 15);
       const poStr = padText(yellow(inv.PurchaseNumber || 'N/A'), 25);
       const statusStr = padText(statusColor(`${statusGlyph(statusColor)} ${status}`), 24);
-      logger.log(`${invId} ${poStr} ${statusStr} ${dim(inv.InvoiceDate || 'Unknown')}`);
+      logger.log(`${invId} ${poStr} ${statusStr} ${dim(formatDate(inv.InvoiceDate) || 'Unknown')}`);
     } else {
       logger.log(` ${bold(blue("•"))} ${bold("Invoice No:")} ${cyan(inv.DocumentNumber)}`);
       logger.log(`   ${bold("PO Number:")}  ${inv.PurchaseNumber || 'N/A'} ${dim(`(${inv.CustomerReference || 'No Ref'})`)}`);
-      logger.log(`   ${bold("Date:")}       ${inv.InvoiceDate || 'Unknown'}`);
+      logger.log(`   ${bold("Date:")}       ${formatDate(inv.InvoiceDate) || 'Unknown'}`);
       logger.log(`   ${bold("Total:")}      ${green(inv.TotalText || '$0.00')}`);
       
       if (inv.OutstandingText && inv.OutstandingText !== '$0.00') {
@@ -143,7 +158,7 @@ function printHeaderGrid(entries, cols = 2, keyWidth = 25, valWidth = 25, logger
   for (let i = 0; i < entries.length; i++) {
     const [k, v] = entries[i];
     const paddedKey = padText(bold(k + ":"), keyWidth);
-    const paddedVal = padText(v, valWidth);
+    const paddedVal = padText(formatDate(v), valWidth);
     row.push(paddedKey + paddedVal);
     if (row.length === cols || i === entries.length - 1) {
       logger.log('   ' + row.join(''));
@@ -292,9 +307,9 @@ export function printBriefItems(data, logger, id, idLabel = "Order") {
   const summary = [];
   if (id) summary.push(`${dim(idLabel + ":")} ${cyan(String(id))}`);
   if (header && Object.keys(header).length > 0) {
-    const po = header["Purchase order number"] || header["Purchase Number"] || header["PO Number"] || header["PO"] || "N/A";
-    const ref = header["Customer Reference"] || header["Reference"] || header["Job Reference"] || "N/A";
-    const date = header["Order Created on"] || header["Order Date"] || header["Invoice Date"] || header["Date"] || "Unknown";
+    const po = headerField(header, HEADER_PO_KEYS) || "N/A";
+    const ref = headerField(header, HEADER_REF_KEYS) || "N/A";
+    const date = formatDate(headerField(header, HEADER_DATE_KEYS)) || "Unknown";
     summary.push(`${dim("PO:")} ${yellow(po)}`, `${dim("Ref:")} ${yellow(ref)}`, `${dim("Date:")} ${yellow(date)}`);
   }
   if (summary.length > 0) logger.log(` ${summary.join(dim(" | "))}`);
@@ -367,4 +382,113 @@ export function printCart(cartData, logger) {
   logger.log(`    ${padText(bold("Tax:"), 12)} ${green(cartData.TaxTotal || "$0.00")}`);
   logger.log(`    ${padText(bold("Total:"), 12)} ${green(bold(cartData.Total || "$0.00"))}`);
   logger.log(dim(`===========================================================`));
+}
+
+// ---------------------------------------------------------------------------
+// --tsv: the spreadsheet export.
+// One header row, then one tab-separated row per record, so a paste lands
+// straight in columns. Parent fields (order/invoice number, PO, ...) repeat on
+// every line-item row - a flat table, no merged headers. Plain text only: no
+// colour, glyphs, or truncation; money and quantities are bare numbers so the
+// sheet treats them as numeric; tabs and newlines inside a field are squashed
+// to a space so a row can never split. A cell is blank where the portal has
+// no such value.
+// ---------------------------------------------------------------------------
+export const ORDER_ITEM_TSV_COLUMNS = ["ORDER", "PO", "ORDER STATUS", "DATE", "LINE", "PART", "DESCRIPTION", "DELIVERED", "ORDERED", "LINE STATUS", "UNIT PRICE", "TOTAL"];
+export const ORDER_LIST_TSV_COLUMNS = ["ORDER", "PO", "STATUS", "DATE", "TOTAL"];
+export const INVOICE_ITEM_TSV_COLUMNS = ["INVOICE", "PO", "REF", "DATE", "LINE", "PART", "DESCRIPTION", "QTY", "UNIT PRICE", "TOTAL"];
+export const INVOICE_LIST_TSV_COLUMNS = ["INVOICE", "PO", "REF", "STATUS", "DATE", "TOTAL", "OUTSTANDING"];
+export const PRICE_TSV_COLUMNS = ["PART", "DESCRIPTION", "QTY", "BUY", "SELL", "LIST", "CURRENCY", "STOCK", "STOCK STATUS", "ERROR"];
+
+function tsvCell(value) {
+  return String(value ?? '').replace(/[\t\r\n]+/g, ' ').trim();
+}
+
+// Money as a bare number for the sheet. The portal is scraped, so this takes
+// the display strings it gives ("$1,234.56") as well as numbers; "" when
+// there is no value.
+function tsvMoney(value) {
+  if (value === null || value === undefined || value === '') return '';
+  const n = typeof value === 'number' ? value : parseFloat(String(value).replace(/[^0-9.-]+/g, ''));
+  return isNaN(n) ? '' : Math.round(n * 100) / 100;
+}
+
+function tsvInt(value) {
+  const n = parseInt(value, 10);
+  return isNaN(n) ? '' : n;
+}
+
+// The scraped order/invoice header is a label -> value map whose labels vary
+// between pages and are not capitalised consistently: the order page says
+// "Order Created on" and "Customer Reference no", the invoice page
+// "Invoice date" (lower-case d) and the same "Customer Reference no". The
+// first present key wins; the lists are shared by the ledger summary line and
+// the --tsv exports so both agree on what they pull out.
+const HEADER_PO_KEYS = ["Purchase order number", "Purchase Number", "PO Number", "PO"];
+const HEADER_REF_KEYS = ["Customer Reference no", "Customer Reference", "Reference", "Job Reference"];
+const HEADER_DATE_KEYS = ["Order Created on", "Order Date", "Invoice date", "Invoice Date", "Date"];
+const HEADER_STATUS_KEYS = ["Status", "Order Status"];
+
+function headerField(header, keys) {
+  for (const k of keys) if (header?.[k]) return header[k];
+  return '';
+}
+
+export function printTsv(columns, rows, logger) {
+  logger.tsv(columns.join('\t'));
+  for (const row of rows) logger.tsv(row.map(tsvCell).join('\t'));
+}
+
+// `order --tsv`: one row per line item. NHP lines carry no line number, so
+// LINE is the 1-based position on the page.
+export function orderItemTsvRows(data, orderId) {
+  const { header, items } = data || {};
+  const po = headerField(header, HEADER_PO_KEYS);
+  const status = headerField(header, HEADER_STATUS_KEYS);
+  const date = formatDate(headerField(header, HEADER_DATE_KEYS));
+  return (items || []).map((item, i) => {
+    const ordered = tsvInt(item.Quantity);
+    const remaining = tsvInt(item.RemainingQuantity);
+    const delivered = ordered === '' || remaining === '' ? '' : Math.max(0, ordered - remaining);
+    return [orderId || '', po, status, date, i + 1, item.ProductCode || '', item.Description || '', delivered, ordered, item.Status || '', tsvMoney(item.UnitPrice), tsvMoney(item.Total)];
+  });
+}
+
+// `orders --tsv` (and the multi-hit outcome of `po`).
+export function orderListTsvRows(orders) {
+  return (orders || []).map((o) => [o.OrderId || o.OrderID || '', o.PurchaseNumber || '', o.OrderStatus || o.Status || '', formatDate(o.OrderDate), tsvMoney(o.TotalText || o.Total)]);
+}
+
+// `invoice --tsv`: one row per invoice line.
+export function invoiceItemTsvRows(data, invoiceId) {
+  const { header, items } = data || {};
+  const po = headerField(header, HEADER_PO_KEYS);
+  const ref = headerField(header, HEADER_REF_KEYS);
+  const date = formatDate(headerField(header, HEADER_DATE_KEYS));
+  return (items || []).map((item, i) => [invoiceId || '', po, ref, date, i + 1, item.ProductCode || '', item.Description || '', tsvInt(item.Quantity), tsvMoney(item.UnitPrice), tsvMoney(item.Total)]);
+}
+
+// `invoices --tsv`.
+export function invoiceListTsvRows(invoices) {
+  return (invoices || []).map((inv) => [inv.DocumentNumber || '', inv.PurchaseNumber || '', inv.CustomerReference || '', inv.OrderStatus || inv.Status || '', formatDate(inv.InvoiceDate), tsvMoney(inv.TotalText), tsvMoney(inv.OutstandingText)]);
+}
+
+// `price --tsv` / `csv --tsv`: one row per returned part. An unknown part keeps
+// PART and QTY and puts the reason in ERROR. STOCK is the NZ on-hand quantity
+// and STOCK STATUS the same in/out test as the badge; the portal has no list
+// price, so LIST is blank and the currency is always NZD.
+export function priceTsvRows(results, originalRequests = [], config = {}) {
+  return (results || []).map((prod) => {
+    const orig = originalRequests.find((p) => p.itemId.toLowerCase() === (prod.ProductId || '').toLowerCase());
+    const qty = orig ? orig.qty : 1;
+    if (prod.HasError || prod.ProductExist === false) {
+      const reason = prod.ErrorMessages?.length ? prod.ErrorMessages.join("; ") : "Item not recognised.";
+      return [prod.ProductId || '', '', qty, '', '', '', '', '', '', reason];
+    }
+    const buy = tsvMoney(prod.AdjustedPriceWithCurrency ?? prod.NetPrice);
+    const margin = config.sellMarginMultiplier;
+    const sell = margin !== null && margin !== undefined && buy !== '' ? tsvMoney(buy * margin) : '';
+    const nzStock = tsvInt(prod.OnHandQty);
+    return [prod.ProductId || '', prod.Description || prod.DisplayName || '', qty, buy, sell, '', 'NZD', nzStock, nzStock > 0 ? 'IN STOCK' : 'OUT OF STOCK', ''];
+  });
 }
