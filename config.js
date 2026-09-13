@@ -1,42 +1,15 @@
+import { loadSettings, resolveCredentials } from "./store.js";
+
+// loadConfig / loadCredentials are kept for library users of earlier
+// versions; the CLI and the client go through store.js directly.
 export async function loadConfig() {
-  const config = { sellMarginMultiplier: null };
-  try {
-    const configUrl = new URL("credentials.json", import.meta.url);
-    const text = await Deno.readTextFile(configUrl);
-    const json = JSON.parse(text);
-    if (json.sellMarginMultiplier !== undefined) {
-      config.sellMarginMultiplier = json.sellMarginMultiplier;
-    }
-  } catch {
-    // Ignore if not present
-  }
-  const marginEnv = Deno.env.get("NHP_SELL_MARGIN");
-  if (marginEnv !== undefined && marginEnv !== null) {
-    const margin = parseFloat(marginEnv);
-    config.sellMarginMultiplier = isNaN(margin) ? null : margin;
-  }
-  return config;
+  return await loadSettings();
 }
 
 export async function loadCredentials() {
-  try {
-    const credsUrl = new URL("credentials.json", import.meta.url);
-    const text = await Deno.readTextFile(credsUrl);
-    const json = JSON.parse(text);
-    if (json.username && json.password) {
-      return { username: json.username, password: json.password };
-    }
-  } catch {
-    // Ignore, try env vars next
-  }
-
-  const usernameEnv = Deno.env.get("NHP_USERNAME");
-  const passwordEnv = Deno.env.get("NHP_PASSWORD");
-  if (usernameEnv && passwordEnv) {
-    return { username: usernameEnv, password: passwordEnv };
-  }
-
-  throw new Error("Credentials not found. Please configure 'credentials.json' or set NHP_USERNAME and NHP_PASSWORD env variables.");
+  const creds = await resolveCredentials();
+  if (!creds) throw new Error("Credentials not found. Run 'nhp login', or set NHP_USERNAME and NHP_PASSWORD.");
+  return { username: creds.username, password: creds.password };
 }
 
 export function parseCsvText(text) {

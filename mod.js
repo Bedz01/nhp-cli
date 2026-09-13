@@ -9,3 +9,5 @@ export { CookieJar } from "./cookie-jar.js";
 export * as config from "./config.js";
 export * as formatters from "./formatters.js";
 export { Logger } from "./logger.js";
+export * as store from "./store.js";
+export * as prompt from "./prompt.js";

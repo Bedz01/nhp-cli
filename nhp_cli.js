@@ -1,5 +1,18 @@
 import { NHPClient } from "./api.js";
-import { loadConfig, parseCsv } from "./config.js";
+import { parseCsv } from "./config.js";
+import {
+  configDir,
+  deleteCredentials,
+  deleteSession,
+  fileExists,
+  legacyPath,
+  loadSettings,
+  resolveCredentials,
+  saveCredentials,
+  saveSettings,
+  SESSION_FILE,
+} from "./store.js";
+import { isInteractive, promptCredentials } from "./prompt.js";
 import {
   INVOICE_ITEM_TSV_COLUMNS,
   INVOICE_LIST_TSV_COLUMNS,
@@ -80,10 +93,73 @@ export function parseCartAddArgs(userArgs) {
   return { items };
 }
 
-async function handleLogin(client, logger) {
+// Credentials for the client, resolved only when a login is actually needed:
+// env vars or the stored file silently; with neither, a person at a terminal
+// is asked and the answer is saved once the login succeeds (onLogin below).
+function credentialsProvider(state, interactive, logger) {
+  return async () => {
+    const creds = await resolveCredentials();
+    if (creds) {
+      if (creds.source === "legacy") logger.warn(`[Notice] Using ${creds.path}. Run 'nhp login' once to move it to ${configDir()}.`);
+      return creds;
+    }
+    if (!interactive) throw new Error("No saved login. Run 'nhp login', or set NHP_USERNAME and NHP_PASSWORD.");
+    logger.log(`No saved login. Enter your NHP portal credentials; they will be kept in ${configDir()}.`);
+    state.prompted = await promptCredentials();
+    return state.prompted;
+  };
+}
+
+async function rememberCredentials(creds, logger) {
+  const saved = await saveCredentials(creds);
+  if (saved.warning) logger.warn(`[Warning] ${saved.warning}`);
+  logger.log(`Saved credentials to ${saved.path}${saved.encrypted ? " (password encrypted with Windows DPAPI)" : ""}.`);
+  return saved;
+}
+
+async function handleLogin(client, options, logger, interactive) {
+  if (options.reset && await deleteCredentials()) logger.log(`Removed the stored credentials.`);
+
+  let creds = await resolveCredentials();
+  let prompted = false;
+  if (!creds) {
+    if (!interactive) throw new Error("No saved login and no terminal to ask on. Set NHP_USERNAME and NHP_PASSWORD, or run 'nhp login' from a terminal.");
+    logger.log(`Enter your NHP portal (nhpnz.co.nz) credentials. They will be kept in ${configDir()}.`);
+    creds = await promptCredentials();
+    prompted = true;
+  } else {
+    const from = creds.source === "env" ? "from NHP_USERNAME/NHP_PASSWORD" : `from ${creds.path}`;
+    logger.log(`Logging in as ${creds.username} (${from})...`);
+  }
+
+  client.credentials = { username: creds.username, password: creds.password };
   await client.ensureLogin(true);
-  logger.json({ success: true });
-  logger.log(`[Success] Login completed and cookies saved.`);
+
+  let saved = null;
+  if (prompted || creds.source === "legacy") {
+    saved = await rememberCredentials(creds, logger);
+    if (creds.source === "legacy") {
+      // The old file held the margin too; carry it over so the old file is
+      // no longer consulted for anything.
+      const settings = await loadSettings({});
+      if (settings.sellMarginMultiplier !== null) await saveSettings({ sellMarginMultiplier: settings.sellMarginMultiplier });
+      logger.log(`Migrated from ${creds.path}; that file is no longer read and can be deleted.`);
+    }
+  }
+
+  logger.json({ success: true, username: creds.username, source: prompted ? "prompt" : creds.source, credentialsPath: saved?.path ?? null, sessionPath: String(client.cookiePath) });
+  logger.log(`[Success] Logged in as ${creds.username}. Session saved to ${client.cookiePath}.`);
+}
+
+async function handleLogout(logger) {
+  const session = await deleteSession();
+  const creds = await deleteCredentials();
+  logger.json({ success: true, sessionRemoved: session, credentialsRemoved: creds });
+  const what = [session && "the saved session", creds && "the stored credentials"].filter(Boolean).join(" and ");
+  logger.log(what ? `Removed ${what} from ${configDir()}.` : `Nothing to remove in ${configDir()}.`);
+  for (const name of [SESSION_FILE, "credentials.json"]) {
+    if (await fileExists(legacyPath(name))) logger.warn(`[Notice] An old ${name} still exists at ${legacyPath(name)}; delete it or it will be picked up again.`);
+  }
 }
 
 async function handleSearch(client, args, logger) {
@@ -515,7 +591,11 @@ Cart:
   cart upload <file>          Upload a CSV of parts to the cart
 
 Authentication:
-  login                       Force a fresh login and refresh cookies
+  login [--reset]             Log in and save the session. Asks for your
+                              username and password the first time (or with
+                              --reset) and remembers them; otherwise re-logs
+                              in with the saved ones.
+  logout                      Forget the saved session and credentials
 
 Options:
   --json                      Print the raw API response as JSON on stdout
@@ -532,15 +612,22 @@ Options:
   -h, --help                  Show this help
   --version                   Show version
 
+State (override the directory with NHP_CONFIG_DIR):
+  ${configDir()}
+  config.json       { "sellMarginMultiplier": 1.25 }   (env: NHP_SELL_MARGIN)
+  credentials.json  saved by 'login'; the password is DPAPI-encrypted on
+                    Windows             (env: NHP_USERNAME, NHP_PASSWORD)
+  cookies.json      the portal session
+
 Failed operations exit with a non-zero status code.`);
 }
 
 if (import.meta.main) {
-  const config = await loadConfig();
+  const config = await loadSettings();
 
   const unknownFlags = [];
   const parsedArgs = parseArgs(Deno.args, {
-    boolean: ["json", "verbose", "brief", "full", "tsv", "help", "version"],
+    boolean: ["json", "verbose", "brief", "full", "tsv", "reset", "help", "version"],
     // "_" keeps positional args as strings - otherwise numeric part numbers
     // like 06850863 get coerced to numbers and lose their leading zeros
     string: ["_", "dateFrom", "dateTo", "purchaseNumber", "documentNumber", "orderNumber", "customerReference"],
@@ -572,16 +659,26 @@ if (import.meta.main) {
   }
 
   const cmd = args[0];
+  // A prompt is only possible with a person on a terminal and stdout not
+  // carrying a machine payload.
+  const interactive = isInteractive() && !isJsonMode && !options.tsv;
+  const state = { prompted: null };
   const client = new NHPClient({
     silent: isJsonMode || options.tsv,
     logger: logger,
-    ...config,
+    credentials: credentialsProvider(state, interactive, logger),
+    // Prompted credentials are saved as soon as the portal accepts them, so
+    // a later failure in the command itself cannot lose them.
+    onLogin: async (creds) => { if (state.prompted && creds === state.prompted) await rememberCredentials(creds, logger); },
   });
 
   try {
     switch (cmd) {
       case "login":
-        await handleLogin(client, logger);
+        await handleLogin(client, options, logger, interactive);
+        break;
+      case "logout":
+        await handleLogout(logger);
         break;
       case "search":
         await handleSearch(client, args.slice(1), logger);

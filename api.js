@@ -1,6 +1,7 @@
 import { DOMParser } from "https://deno.land/x/deno_dom@v0.1.56/deno-dom-wasm.ts";
 import { CookieJar } from "./cookie-jar.js";
-import { loadCredentials, parseCsvText } from "./config.js";
+import { parseCsvText } from "./config.js";
+import { configPath, ensureConfigDir, fileExists, legacyPath, resolveCredentials, SESSION_FILE } from "./store.js";
 import { Logger } from "./logger.js";
 
 export class NHPAPIError extends Error {
@@ -33,8 +34,15 @@ function extractToken(html) {
 export class NHPClient {
   constructor(config = {}) {
     this.jar = new CookieJar();
-    this.cookiePath = config.cookiePath || new URL("cookies.json", import.meta.url);
+    // Session cache: the per-user config dir (store.js) unless a path is given.
+    this.cookiePath = config.cookiePath || null;
+    // Static { username, password }, or an async provider called only when a
+    // login is actually needed (the CLI uses one so a stored password is
+    // decrypted, or prompted for, no more often than that).
     this.credentials = config.credentials || null;
+    // Called with the credentials after each successful login.
+    this.onLogin = config.onLogin || null;
+    this.loggedInAt = null;
     this.userAgent = config.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
     // NHP's portal is extremely slow; order/invoice listings alone can take
     // over a minute, so the default timeout is deliberately generous.
@@ -46,6 +54,16 @@ export class NHPClient {
   }
 
   async init() {
+    if (!this.cookiePath) {
+      await ensureConfigDir();
+      this.cookiePath = configPath(SESSION_FILE);
+      // Upgrade path: a session saved by an older version next to the module.
+      // It is loaded once and lands in the config dir on the next save.
+      if (!(await fileExists(this.cookiePath)) && (await fileExists(legacyPath(SESSION_FILE)))) {
+        await this.jar.loadFromFile(legacyPath(SESSION_FILE));
+        return;
+      }
+    }
     await this.jar.loadFromFile(this.cookiePath);
   }
 
@@ -172,7 +190,10 @@ export class NHPClient {
   async performLogin() {
     this._cachedToken = null;
     this.jar.clear();
-    const creds = this.credentials || await loadCredentials();
+    const creds = typeof this.credentials === "function"
+      ? await this.credentials()
+      : (this.credentials || await resolveCredentials());
+    if (!creds) throw new NHPAPIError("No credentials. Run 'nhp login', or set NHP_USERNAME and NHP_PASSWORD.", 401, "");
 
     this.logger.debug(`[1/2] Fetching login page to get cookies and CRSF token...`);
     const getResp = await this._fetch("https://www.nhpnz.co.nz/login", {
@@ -221,7 +242,9 @@ export class NHPClient {
     }
 
     if (isSuccess) {
+      this.loggedInAt = Date.now();
       this.logger.debug(`[Auth] Login successful. Cookies saved.`);
+      if (this.onLogin) await this.onLogin(creds);
     } else {
       throw new NHPAPIError(`Login response indicates failure.`, postResp.status, postBody);
     }

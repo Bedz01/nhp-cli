@@ -36,10 +36,10 @@ cd nhp-cli
 deno run -A nhp_cli.js help
 ```
 
-`-A` grants the network and file access the tool needs: the portal, and the
-`credentials.json` / `cookies.json` files it keeps next to `nhp_cli.js`.
-`deno task cli <args>` is a shorthand for the same command. Deno fetches the
-dependencies on the first run, so that run takes a moment longer.
+`-A` grants the network and file access the tool needs: the portal, and its
+state directory (see Setup). `deno task cli <args>` is a shorthand for the
+same command. Deno fetches the dependencies on the first run, so that run
+takes a moment longer.
 
 To run it as `nhp` from any directory, install it globally:
 
@@ -55,31 +55,57 @@ flags. Re-run the install command after pulling changes.
 
 ### Setup
 
-Before running the CLI, you must configure your NHP login details. You can do
-this in one of two ways:
+Log in once:
 
-**Option 1: credentials.json** Create a `credentials.json` file next to
-`nhp_cli.js` (the repository root):
-
-```json
-{
-  "username": "your_email@example.com",
-  "password": "your_password",
-  "sellMarginMultiplier": 1.25
-}
 ```
-*(Note: `sellMarginMultiplier` is optional. If provided, the CLI will calculate and display a sell price for products).*
+nhp login
+```
 
-**Option 2: Environment Variables** Alternatively, you can export the following
-environment variables:
+It asks for your portal username and password (the password is not echoed),
+logs in, and remembers both so later commands - and the frequent re-logins
+the portal's short sessions force - happen silently. Any command run before
+that will ask the same questions itself if it is running in a terminal.
+`nhp login --reset` asks again (to change accounts); `nhp logout` forgets
+the session and the saved credentials.
 
-- `NHP_USERNAME`
-- `NHP_PASSWORD`
+**Where things live.** All state goes in a per-user directory, never in the
+checkout, so it survives re-clones and `git` never sees it:
+
+| Platform | Directory |
+| --- | --- |
+| Windows | `%APPDATA%\nhp` |
+| Linux / macOS | `$XDG_CONFIG_HOME/nhp`, else `~/.config/nhp` |
+| Override | `NHP_CONFIG_DIR` |
+
+```
+config.json       { "sellMarginMultiplier": 1.25 }   optional; enables the Sell: line
+credentials.json  saved by `nhp login`
+cookies.json      the portal session
+```
+
+**How the password is stored.** On Windows it is encrypted with DPAPI in
+the current-user scope, so the file can only be decrypted by your Windows
+account on that machine; copying it elsewhere yields nothing. The CLI does
+this through a short PowerShell script (`ProtectedData`, no cmdlets or
+modules involved), tried in Windows PowerShell 5.1 and then `pwsh`, and only
+when it actually needs to log in. If neither PowerShell works, the password
+is stored as plain text and `nhp login` says so. On Linux and macOS the file
+is plain text with mode `600`.
+
+**Scripts and CI.** Environment variables override the stored file and never
+prompt:
+
+- `NHP_USERNAME`, `NHP_PASSWORD`
 - `NHP_SELL_MARGIN` *(optional)*
+- `NHP_CONFIG_DIR` *(optional)*
 
-Once configured, the CLI will automatically log in on its first run and cache
-your session in `cookies.json` (stored alongside the module, no matter which
-directory you run from).
+With `--json` or `--tsv`, or with no terminal, a missing login is an error
+(`Run 'nhp login'`) rather than a prompt, so stdout stays clean.
+
+**Upgrading from 1.3 or earlier.** The old `credentials.json` and
+`cookies.json` next to `nhp_cli.js` are still read as a fallback. Run
+`nhp login` once: it moves the credentials (and the margin) into the state
+directory, after which the old files are no longer read and can be deleted.
 
 ### Commands
 
@@ -138,7 +164,11 @@ Run `nhp help` (or `nhp --help`) for the full built-in reference.
 
 **Authentication**
 
-- `nhp login` - Force login and refresh cookies.
+- `nhp login [--reset]` - Log in and save the session. Asks for the username
+  and password the first time (or with `--reset`) and remembers them;
+  otherwise re-logs in with the saved ones. `--json` reports the username,
+  where the credentials came from, and the file paths.
+- `nhp logout` - Forget the saved session and credentials.
 
 ### Spreadsheet Export (`--tsv`)
 
@@ -216,9 +246,9 @@ import { NHPClient } from "./mod.js";
 
 ### Initialization
 
-Create a new instance of the client. By default, it will attempt to read
-credentials from `credentials.json` (or environment variables) and persist
-session cookies to `cookies.json` next to the module.
+Create a new instance of the client. By default it resolves credentials the
+way the CLI does (environment variables, then the file `nhp login` saved)
+and keeps the session in the same state directory (see Setup).
 
 ```javascript
 const client = new NHPClient({
@@ -235,6 +265,12 @@ const client = new NHPClient({
 // Always call ensureLogin() before making API calls
 await client.ensureLogin();
 ```
+
+`credentials` may also be an async function; it is called only when a login
+is actually needed, so an expensive lookup (a keychain, a prompt) does not
+run on every command. `onLogin(creds)` is called after each successful
+login. The `store` export has the pieces the CLI uses: `resolveCredentials`,
+`saveCredentials`, `dpapiProtect`/`dpapiUnprotect`, `configDir`.
 
 All requests carry a timeout and automatically re-authenticate once if the
 saved session has expired.
