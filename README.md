@@ -11,23 +11,55 @@ manage your cart, and pull order/invoice history.
 
 ## CLI Usage
 
-The CLI tool is powered by Deno. You can run it directly with
-`deno run -A nhp_cli.js`, via `deno task cli`, or install it globally as `nhp`:
+### Requirements
+
+- [Deno](https://deno.com/) 2.x. Install it with the official one-liner, then
+  check `deno --version`:
+
+  ```powershell
+  irm https://deno.land/install.ps1 | iex            # Windows (PowerShell)
+  ```
+  ```bash
+  curl -fsSL https://deno.land/install.sh | sh       # macOS / Linux
+  ```
+
+- Git, to clone this repository.
+- A login for the NHP New Zealand web portal (`nhpnz.co.nz`).
+
+### Install
+
+Clone the repository and run the CLI from inside it:
+
+```bash
+git clone https://github.com/Bedz01/nhp-cli.git
+cd nhp-cli
+deno run -A nhp_cli.js help
+```
+
+`-A` grants the network and file access the tool needs: the portal, and the
+`credentials.json` / `cookies.json` files it keeps next to `nhp_cli.js`.
+`deno task cli <args>` is a shorthand for the same command. Deno fetches the
+dependencies on the first run, so that run takes a moment longer.
+
+To run it as `nhp` from any directory, install it globally:
 
 ```bash
 deno install -g -A -f -n nhp nhp_cli.js
 ```
 
-All dependencies are referenced with explicit versioned specifiers, so the
-installed command works from any directory without extra flags.
+Deno puts the `nhp` shim in its bin directory (`~/.deno/bin`, or
+`%USERPROFILE%\.deno\bin` on Windows) and tells you if that directory is not
+on your `PATH` yet. All dependencies are referenced with explicit versioned
+specifiers, so the installed command works from any directory without extra
+flags. Re-run the install command after pulling changes.
 
 ### Setup
 
 Before running the CLI, you must configure your NHP login details. You can do
 this in one of two ways:
 
-**Option 1: credentials.json** Create a `credentials.json` file in the root
-directory:
+**Option 1: credentials.json** Create a `credentials.json` file next to
+`nhp_cli.js` (the repository root):
 
 ```json
 {
