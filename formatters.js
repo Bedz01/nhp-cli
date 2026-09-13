@@ -282,22 +282,68 @@ export function printInvoiceDetails(data, invoiceId, logger) {
   }
 }
 
-export function printBriefItems(data, logger) {
+export function printBriefItems(data, logger, id, idLabel = "Order") {
   const { header, items } = data || {};
   if (!items || items.length === 0) return;
-  
+
+  // The id leads the summary line so stacked ledgers (nhp order A B C) stay
+  // identifiable. It comes from the argument rather than the scraped header,
+  // whose labels differ between orders and invoices.
+  const summary = [];
+  if (id) summary.push(`${dim(idLabel + ":")} ${cyan(String(id))}`);
   if (header && Object.keys(header).length > 0) {
     const po = header["Purchase order number"] || header["Purchase Number"] || header["PO Number"] || header["PO"] || "N/A";
     const ref = header["Customer Reference"] || header["Reference"] || header["Job Reference"] || "N/A";
     const date = header["Order Created on"] || header["Order Date"] || header["Invoice Date"] || header["Date"] || "Unknown";
-    logger.log(` ${dim("PO:")} ${yellow(po)} ${dim("| Ref:")} ${yellow(ref)} ${dim("| Date:")} ${yellow(date)}`);
+    summary.push(`${dim("PO:")} ${yellow(po)}`, `${dim("Ref:")} ${yellow(ref)}`, `${dim("Date:")} ${yellow(date)}`);
   }
+  if (summary.length > 0) logger.log(` ${summary.join(dim(" | "))}`);
 
-  logger.log(dim(`${padText("PART", 26)} QTY`));
+  // Order items carry shipping columns (RemainingQuantity/Status); invoice
+  // items don't, so the invoice ledger collapses to PART DESCRIPTION QTY.
+  const shipping = items.some(i => i.RemainingQuantity !== undefined || i.Status !== undefined);
+  const cols = shipping
+    ? `${padText("PART", 26)} ${padText("DESCRIPTION", BRIEF_DESC_WIDTH)} ${padText("DLV/ORD", 9)} STATUS`
+    : `${padText("PART", 26)} ${padText("DESCRIPTION", BRIEF_DESC_WIDTH)} QTY`;
+  logger.log(dim(cols));
+
   for (const item of items) {
-    const code = padText(cyan(item.ProductCode || 'Unknown'), 26);
-    logger.log(`${code} ${green(bold(String(item.Quantity || 0)))}`);
+    const code = padText(cyan(truncateText(item.ProductCode || 'Unknown', 26)), 26);
+    const desc = padText(truncateText(item.Description || '', BRIEF_DESC_WIDTH), BRIEF_DESC_WIDTH);
+    const ordered = parseInt(item.Quantity, 10);
+    const orderedStr = isNaN(ordered) ? String(item.Quantity || 0) : String(ordered);
+
+    if (!shipping) {
+      logger.log(`${code} ${desc} ${green(bold(orderedStr))}`);
+      continue;
+    }
+
+    const remaining = parseInt(item.RemainingQuantity, 10);
+    const delivered = isNaN(remaining) || isNaN(ordered) ? null : Math.max(0, ordered - remaining);
+    const qtyColor = deliveryColor(ordered, delivered);
+    const qtyStr = padText(qtyColor(bold(`${delivered === null ? '?' : delivered}/${orderedStr}`)), 9);
+    const status = item.Status || '';
+    const statusColor = getStatusColor(status);
+    logger.log(`${code} ${desc} ${qtyStr} ${statusColor(`${statusGlyph(statusColor)} ${status}`)}`);
   }
+}
+
+// Description column width in the brief item ledger; longer text is cut
+// with an ellipsis so every item stays on one line.
+const BRIEF_DESC_WIDTH = 40;
+
+function truncateText(text, width) {
+  const s = String(text ?? '');
+  return s.length > width ? s.slice(0, width - 1) + '…' : s;
+}
+
+// Same traffic-light scheme as the Remaining line in printOrderDetails:
+// green fully delivered, yellow partial, red nothing delivered yet.
+function deliveryColor(ordered, delivered) {
+  if (delivered === null || !(ordered > 0)) return (s) => s;
+  if (delivered >= ordered) return green;
+  if (delivered > 0) return yellow;
+  return red;
 }
 
 export function printCart(cartData, logger) {

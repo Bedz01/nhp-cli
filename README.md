@@ -64,15 +64,28 @@ Run `nhp help` (or `nhp --help`) for the full built-in reference.
 
 **Orders & Invoices**
 
-- `nhp orders [offset] [--brief]` - Get order history. Optional search flags:
-  `--dateFrom`, `--dateTo`, `--purchaseNumber`, `--documentNumber`,
-  `--orderNumber`, `--customerReference`. Add `--brief` for a compact table view.
+- `nhp orders [offset] [--full]` - Get order history as a compact ledger
+  (`ORDER  PO  STATUS  DATE`, one line per order). Add `--full` for the
+  record view with totals. Optional search flags: `--dateFrom`, `--dateTo`,
+  `--purchaseNumber`, `--documentNumber`, `--orderNumber`,
+  `--customerReference`.
 - `nhp invoices [offset] [--brief]` - Get invoice history. Accepts the same
-  optional search flags as orders.
-- `nhp order <orderId> [--brief]` - Get detailed line items and shipping status
-  for a specific order.
+  optional search flags as orders. Add `--brief` for the ledger view.
+- `nhp order <orderId...> [--full]` - Line items for one or more orders as a
+  ledger, one line per item: `PART  DESCRIPTION  DLV/ORD  STATUS`
+  (description truncated to fit, delivered/ordered quantity coloured
+  green/yellow/red). Several order IDs are fetched one at a time (each is a
+  full page scrape) and print one ledger each, separated by a blank line and
+  led by `Order | PO | Ref | Date`; an order that can't be fetched is reported
+  on stderr without stopping the others, and the command still exits non-zero.
+  With several IDs, `--json` emits an array with one entry per argument (a
+  failure becoming `{ orderId, error }`); a single ID keeps the bare scrape
+  result. Add `--full` for the record view with header, addresses, prices and
+  totals.
 - `nhp invoice <id> [--brief]` - Get detailed line items for a specific invoice.
-- `nhp po <query>` - Search order history by PO Number.
+  `--brief` prints `PART  DESCRIPTION  QTY`.
+- `nhp po <query>` - Search order history by PO Number. A single match
+  auto-expands like `nhp order` (ledger, or record view with `--full`).
 
 **Cart Management**
 

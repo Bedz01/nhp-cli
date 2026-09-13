@@ -146,7 +146,8 @@ async function handleOrders(client, offsetStr, options, logger) {
   logger.json(results);
 
   if (!logger.isJson) {
-    printOrders(results?.NhpOrders || [], logger, options.brief);
+    // The ledger view is the default for order lists; --full restores the record view.
+    printOrders(results?.NhpOrders || [], logger, !options.full);
   }
 }
 
@@ -163,30 +164,65 @@ async function handleInvoices(client, offsetStr, options, logger) {
   }
 }
 
-async function handleOrderDetails(client, orderId, options, logger) {
-  if (!orderId) {
+async function handleOrderDetails(client, orderIds, options, logger) {
+  if (orderIds.length === 0) {
     logger.error("Please specify an order ID.");
     Deno.exit(1);
   }
 
-  const brief = options?.brief;
-  if (!brief) logger.log(`Fetching details for order: ${orderId}...`);
-  const data = await client.getOrderDetails(orderId);
+  // The item ledger is the default; --full restores the header/address/item record view.
+  const brief = !options?.full;
+  if (!brief) {
+    const what = orderIds.length === 1 ? `order: ${orderIds[0]}` : `${orderIds.length} orders`;
+    logger.log(`Fetching details for ${what}...`);
+  }
 
-  logger.json(data);
-
-  if (!logger.isJson) {
-    if (brief) {
-      if (data?.items?.length) {
-        printBriefItems(data, logger);
-      } else {
-        logger.error(`No items found for order ${orderId}. The order may not exist.`);
-        Deno.exit(1);
-      }
-    } else {
-      printOrderDetails(data, orderId, logger);
+  // Fetched one at a time: these are full page loads through a single scraped
+  // session, so parallel requests buy little and risk tripping the portal.
+  // A failure is kept per order instead of sinking the rest of the batch.
+  const results = [];
+  for (const orderId of orderIds) {
+    try {
+      results.push({ orderId, data: await client.getOrderDetails(orderId), error: null });
+    } catch (err) {
+      results.push({ orderId, data: null, error: err });
     }
   }
+
+  // One order keeps the original JSON contract: the bare scrape result, and a
+  // failure thrown to the top-level handler. Several orders emit an array with
+  // one entry per requested order, in the order asked for - a failed lookup
+  // becoming an { orderId, error } entry so the positions still line up with
+  // the arguments.
+  if (results.length === 1) {
+    if (results[0].error) throw results[0].error;
+    logger.json(results[0].data);
+  } else {
+    logger.json(results.map((r) => r.error ? { orderId: r.orderId, error: r.error.message } : r.data));
+  }
+
+  let failed = false;
+
+  if (!logger.isJson) {
+    results.forEach(({ orderId, data, error }, i) => {
+      if (i > 0 && brief) logger.log("");
+      if (error) {
+        logger.error(`Error fetching order ${orderId}:`, error.message);
+        failed = true;
+      } else if (brief) {
+        if (data?.items?.length) {
+          printBriefItems(data, logger, orderId);
+        } else {
+          logger.error(`No items found for order ${orderId}. The order may not exist.`);
+          failed = true;
+        }
+      } else {
+        printOrderDetails(data, orderId, logger);
+      }
+    });
+  }
+
+  if (failed || results.some((r) => r.error)) Deno.exit(1);
 }
 
 async function handleInvoiceDetails(client, invoiceId, options, logger) {
@@ -204,7 +240,7 @@ async function handleInvoiceDetails(client, invoiceId, options, logger) {
   if (!logger.isJson) {
     if (brief) {
       if (data?.items?.length) {
-        printBriefItems(data, logger);
+        printBriefItems(data, logger, invoiceId, "Invoice");
       } else {
         logger.error(`No items found for invoice ${invoiceId}. The invoice may not exist.`);
         Deno.exit(1);
@@ -215,7 +251,7 @@ async function handleInvoiceDetails(client, invoiceId, options, logger) {
   }
 }
 
-async function handlePo(client, args, logger) {
+async function handlePo(client, args, options, logger) {
   const query = args.join(" ").trim();
   if (!query) {
     logger.error("Please specify a PO string to search for.");
@@ -235,11 +271,13 @@ async function handlePo(client, args, logger) {
     } else if (matchedOrders.length === 1) {
       const orderId = matchedOrders[0].OrderId || matchedOrders[0].OrderID;
       logger.log(`Found exactly 1 match (Order: ${orderId}). Fetching details...`);
-      const items = await client.getOrderDetails(orderId);
-      printOrderDetails(items, orderId, logger);
+      const data = await client.getOrderDetails(orderId);
+      // Same default as `order <id>`: ledger unless --full.
+      if (options?.full) printOrderDetails(data, orderId, logger);
+      else printBriefItems(data, logger, orderId);
     } else {
       logger.log(`\nFound ${matchedOrders.length} matching orders:`);
-      printOrders(matchedOrders, logger);
+      printOrders(matchedOrders, logger, true);
       logger.log(`Please run 'nhp order <OrderId>' to view details for the desired order.`);
     }
   }
@@ -414,9 +452,9 @@ Products & Pricing:
                               (columns: partNumber[,qty] - qty defaults to 1)
 
 Orders & Invoices:
-  orders [offset] [--brief]   Order history (20 per page)
+  orders [offset] [--full]    Order history (20 per page, ledger by default)
   invoices [offset] [--brief] Invoice history (20 per page)
-  order <orderId> [--brief]   Line items and shipping status for an order
+  order <orderId...> [--full] Line items and shipping status for one or more orders (ledger by default)
   invoice <id> [--brief]      Line items for an invoice
   po <query>                  Search order history by PO number
 
@@ -435,7 +473,9 @@ Authentication:
 Options:
   --json                      Print the raw API response as JSON on stdout
   --verbose                   Show debug output (auth flow, etc.)
-  --brief                     Compact output for orders/invoices commands
+  --brief                     One-line ledger output for invoices/invoice
+                              (already the default for orders/order/po)
+  --full                      Record view for orders/order/po
   --dateFrom, --dateTo, --purchaseNumber, --documentNumber,
   --orderNumber, --customerReference
                               Search filters for orders/invoices
@@ -450,7 +490,7 @@ if (import.meta.main) {
 
   const unknownFlags = [];
   const parsedArgs = parseArgs(Deno.args, {
-    boolean: ["json", "verbose", "brief", "help", "version"],
+    boolean: ["json", "verbose", "brief", "full", "help", "version"],
     // "_" keeps positional args as strings - otherwise numeric part numbers
     // like 06850863 get coerced to numbers and lose their leading zeros
     string: ["_", "dateFrom", "dateTo", "purchaseNumber", "documentNumber", "orderNumber", "customerReference"],
@@ -509,13 +549,13 @@ if (import.meta.main) {
         await handleInvoices(client, args[1], options, logger);
         break;
       case "order":
-        await handleOrderDetails(client, args[1], options, logger);
+        await handleOrderDetails(client, args.slice(1), options, logger);
         break;
       case "invoice":
         await handleInvoiceDetails(client, args[1], options, logger);
         break;
       case "po":
-        await handlePo(client, args.slice(1), logger);
+        await handlePo(client, args.slice(1), options, logger);
         break;
       case "cart":
         await handleCart(client, args.slice(1), logger);
