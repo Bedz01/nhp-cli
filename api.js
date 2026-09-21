@@ -31,6 +31,19 @@ export function normalizeOrderId(orderId) {
   return String(orderId).toUpperCase().replace(/^[A-Z]+-\d+-/, "");
 }
 
+// An order's line items as cart-addable { itemId, qty } entries. Deleted and
+// zero-quantity lines (cancelled / not yet confirmed) are skipped, and
+// repeated parts are merged into one entry.
+export function orderCartItems(lineItems) {
+  const byId = new Map();
+  for (const l of lineItems || []) {
+    if (l.isdeleted || !l.itemId || !((l.qty ?? 0) > 0)) continue;
+    const id = String(l.itemId).toUpperCase();
+    byId.set(id, { itemId: id, qty: (byId.get(id)?.qty ?? 0) + l.qty });
+  }
+  return [...byId.values()];
+}
+
 function chunk(list, size) {
   const out = [];
   for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
@@ -410,6 +423,16 @@ export class NHPClient {
       }
       return merged;
     });
+  }
+
+  // Re-adds a previous order's lines to the cart. Returns the attempted
+  // items plus the batch outcome: { orderId, items, applied, errors }.
+  async addOrderToCart(orderId) {
+    const details = await this.getOrderDetails(orderId);
+    const items = orderCartItems(details?.lineItems);
+    if (items.length === 0) return { orderId: normalizeOrderId(orderId), items, applied: [], errors: [] };
+    const result = await this.addToCartBatch(items);
+    return { orderId: normalizeOrderId(orderId), items, ...result };
   }
 
   // `line` is a line item from getCart(); PATCH wants the product and

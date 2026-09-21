@@ -100,6 +100,9 @@ Run `nhp help` for the full reference with flags.
   `clear` - inspect and edit the cart. Part numbers win over line numbers
   when both readings are possible.
 - `nhp cart upload <file>` - add a CSV of parts (same format as `nhp csv`).
+- `nhp cart from-order <id...>` - re-add a previous order's items to the
+  cart (cancelled and zero-quantity lines are skipped, repeated parts
+  merged). Handy for reordering: `nhp cart from-order SOR1314816`.
 
 There is deliberately no checkout: nothing in this tool can place an order.
 
@@ -248,6 +251,7 @@ number.
 
 ```javascript
 await client.addToCart("115797", 2);
+await client.addOrderToCart("SOR1314816"); // re-add a previous order's lines
 const cart = await client.getCart(); // { cart, lineItems, miniCart, messages }
 await client.updateCartLineQuantity(cart.lineItems[0], 5);
 await client.removeCartLine(cart.lineItems[0].id);

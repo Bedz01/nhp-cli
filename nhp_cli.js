@@ -551,6 +551,43 @@ async function handleCart(client, args, logger) {
       logger.log(results.cleared === 0 ? `Cart was already empty.` : `Successfully cleared the cart (${results.cleared} line${results.cleared === 1 ? "" : "s"}).`);
       break;
     }
+    case "from-order": {
+      const orderIds = args.slice(1).filter(Boolean);
+      if (orderIds.length === 0) {
+        logger.error("Please specify one or more order IDs (e.g. SOR1314816).");
+        Deno.exit(1);
+      }
+
+      // Same multi-record contract as `order`: one bad order never sinks the
+      // rest, --json lines up with the arguments, non-zero exit on any failure.
+      const results = [];
+      let failed = false;
+      for (const orderId of orderIds) {
+        logger.log(`Adding items from order ${orderId} to cart...`);
+        try {
+          const res = await client.addOrderToCart(orderId);
+          results.push(res);
+          const added = res.items.length - res.errors.length;
+          if (res.items.length === 0) {
+            logger.error(`No addable lines on order ${orderId}. The order may not exist or all its lines are cancelled.`);
+            failed = true;
+          } else if (res.errors.length === 0) {
+            logger.log(`Added ${added} item${added === 1 ? "" : "s"} from ${orderId} to cart.`);
+          } else {
+            if (added > 0) logger.log(`Added ${added} of ${res.items.length} items from ${orderId} to cart.`);
+            for (const e of res.errors) logger.error(`[Failed] '${e.productID}' was not added: ${e.message}`);
+            failed = true;
+          }
+        } catch (err) {
+          results.push({ orderId, error: err.message });
+          logger.error(`Error adding order ${orderId}:`, err.message);
+          failed = true;
+        }
+      }
+      logger.json(results.length === 1 ? results[0] : results);
+      if (failed) Deno.exit(1);
+      break;
+    }
     case "upload": {
       const csvFilePath = args[1];
       if (!csvFilePath) {
@@ -572,7 +609,7 @@ async function handleCart(client, args, logger) {
       break;
     }
     default:
-      logger.error(`Unknown cart subcommand: ${subCmd}. Available: add, list, remove, update, clear, upload`);
+      logger.error(`Unknown cart subcommand: ${subCmd}. Available: add, list, remove, update, clear, upload, from-order`);
       Deno.exit(1);
   }
 }
@@ -612,6 +649,7 @@ Cart:
   cart update <part|line#> <qty>  Change an item's quantity
   cart clear                  Empty the cart
   cart upload <file>          Upload a CSV of parts to the cart
+  cart from-order <id...>     Re-add a previous order's items to the cart
 
 Authentication:
   login [--reset]             Log in and save the session. Asks for your
