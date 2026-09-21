@@ -4,6 +4,8 @@ A CLI and library for the NHP New Zealand trade portal (`nhpnz.co.nz`):
 product search, pricing and stock, order/invoice history, and cart
 management from the terminal.
 
+![nhp price and order ledgers](.github/terminal.svg)
+
 > [!NOTE]
 > Configured for NHP New Zealand. The Australian portal (`nhp.com.au`) runs
 > the same platform and should work with minor domain tweaks.
@@ -174,6 +176,9 @@ The portal was rebuilt in September 2026 (Next.js over a REST API at
 - **Dates are ISO timestamps**, except line statuses, which embed unpadded
   `d/M/yyyy` inside text like `Est. Delivery: 22/09/2026`. Every printed
   date goes through `formatDate`, which normalises both to `dd/mm/yyyy`.
+- **Line statuses contain literal HTML.** A delivered line's `eta` is
+  `Delivered<br/>` - the API serves display markup, not data. Statuses go
+  through `cleanStatus`, which strips tags and collapses whitespace.
 
 ## Library usage
 

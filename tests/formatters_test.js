@@ -288,6 +288,24 @@ Deno.test("formatDate renders every date as dd/mm/yyyy and passes non-dates thro
   assertEquals(formatDate("Not a date"), "Not a date");
 });
 
+// Regression: line statuses arrive with literal HTML embedded - a delivered
+// line's eta/orderStatus is "Delivered<br/>". No tag may ever be printed.
+Deno.test("line statuses with embedded HTML are cleaned before printing", () => {
+  const data = orderFixture();
+  data.lineItems[0].eta = "Delivered<br/>";
+  data.lineItems[1].eta = "Part Shipped<br/>Est. Delivery: 22/09/2026";
+
+  const logger = new TestLogger();
+  printBriefItems(orderDetailView(data), logger);
+  assertStringIncludes(logger.lines[2], "● Delivered");
+  assertStringIncludes(logger.lines[3], "Part Shipped Est. Delivery: 22/09/2026");
+  assert(!logger.output.includes("<br"), "no HTML tags in the ledger");
+
+  const tsv = new TestLogger();
+  printTsv(ORDER_ITEM_TSV_COLUMNS, orderItemTsvRows(data, "SOR9900001"), tsv);
+  assert(!tsv.output.includes("<br"), "no HTML tags in the export");
+});
+
 Deno.test("humanStatus turns enums into words and passes everything else through", () => {
   assertEquals(humanStatus("ORDER_RECEIVED"), "Order Received");
   assertEquals(humanStatus("IN_PROGRESS"), "In Progress");

@@ -280,6 +280,12 @@ function printAddressesGrid(addresses, width = 35, logger) {
 // invoice lines don't.
 // ---------------------------------------------------------------------------
 
+// Line statuses arrive with literal HTML embedded ("Delivered<br/>", or a
+// <br/> between status and ETA); strip the tags and collapse the whitespace.
+export function cleanStatus(value) {
+  return String(value ?? '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 // GET /orders/{id}: header fields flattened on the object + lineItems.
 // netPrice is the account's unit price (unitPrice is list).
 export function orderDetailView(data) {
@@ -291,7 +297,7 @@ export function orderDetailView(data) {
     remainingQty: l.remainingQty,
     total: l.lineAmount,
     uom: l.unitOfMeasureDescription || l.unitOfMeasureId || '',
-    status: l.eta || l.lineStatus || (l.isBackOrder ? 'Back Order' : ''),
+    status: cleanStatus(l.eta || l.lineStatus || (l.isBackOrder ? 'Back Order' : '')),
     shipping: true,
   }));
   const header = {
@@ -328,7 +334,7 @@ export function invoiceDetailView(data) {
     unitPrice: l.netPrice ?? l.unitPrice,
     qty: l.quantity,
     total: l.lineAmount,
-    status: l.lineStatus || '',
+    status: cleanStatus(l.lineStatus),
     shipping: false,
   }));
   const header = {
@@ -551,7 +557,7 @@ export function orderItemTsvRows(data, orderId) {
     const ordered = tsvInt(l.qty);
     const remaining = tsvInt(l.remainingQty);
     const delivered = ordered === '' || remaining === '' ? '' : Math.max(0, ordered - remaining);
-    const status = l.eta || l.lineStatus || (l.isBackOrder ? 'Back Order' : '');
+    const status = cleanStatus(l.eta || l.lineStatus || (l.isBackOrder ? 'Back Order' : ''));
     return [orderId || view.id || '', view.po, view.status, formatDate(view.date), l.lineNo ?? i + 1, l.itemId || '', l.itemName || '', delivered, ordered, status, tsvMoney(l.netPrice ?? l.unitPrice), tsvMoney(l.lineAmount)];
   });
 }
