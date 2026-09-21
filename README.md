@@ -1,76 +1,38 @@
-# NHPProxy CLI & Library
+# nhp-cli
 
-This package provides a CLI and an API Library to integrate with NHP New
-Zealand. You can search products, check pricing, check stock availability,
-manage your cart, and pull order/invoice history.
+A CLI and library for the NHP New Zealand trade portal (`nhpnz.co.nz`):
+product search, pricing and stock, order/invoice history, and cart
+management from the terminal.
 
 > [!NOTE]
-> This tool is currently configured for NHP New Zealand (`nhpnz.co.nz`).
-> However, it should also work on the Australian version of the site
-> (`nhp.com.au`) with some minor domain and configuration tweaks.
+> Configured for NHP New Zealand. The Australian portal (`nhp.com.au`) runs
+> the same platform and should work with minor domain tweaks.
 
-## CLI Usage
+## Install
 
-### Requirements
-
-- [Deno](https://deno.com/) 2.x. Install it with the official one-liner, then
-  check `deno --version`:
-
-  ```powershell
-  irm https://deno.land/install.ps1 | iex            # Windows (PowerShell)
-  ```
-  ```bash
-  curl -fsSL https://deno.land/install.sh | sh       # macOS / Linux
-  ```
-
-- Git, to clone this repository.
-- A login for the NHP New Zealand web portal (`nhpnz.co.nz`).
-
-### Install
-
-Clone the repository and run the CLI from inside it:
+Requires [Deno](https://deno.com/) 2.x and an NHP portal login.
 
 ```bash
 git clone https://github.com/Bedz01/nhp-cli.git
 cd nhp-cli
-deno run -A nhp_cli.js help
-```
-
-`-A` grants the network and file access the tool needs: the portal, and its
-state directory (see Setup). `deno task cli <args>` is a shorthand for the
-same command. Deno fetches the dependencies on the first run, so that run
-takes a moment longer.
-
-To run it as `nhp` from any directory, install it globally:
-
-```bash
 deno install -g -A -f -n nhp nhp_cli.js
 ```
 
-Deno puts the `nhp` shim in its bin directory (`~/.deno/bin`, or
-`%USERPROFILE%\.deno\bin` on Windows) and tells you if that directory is not
-on your `PATH` yet. All dependencies are referenced with explicit versioned
-specifiers, so the installed command works from any directory without extra
-flags. Re-run the install command after pulling changes.
+That makes `nhp` available from any directory (`deno run -A nhp_cli.js` works
+too). Re-run the install command after pulling changes.
 
-### Setup
-
-Log in once:
+## Setup
 
 ```
 nhp login
 ```
 
-It asks for your portal username and password (the password is not echoed),
-logs in, and remembers both so later commands - and the re-login needed when
-the portal's 48-hour session expires - happen silently. Any command run
-before that will ask the same questions itself if it is running in a
-terminal.
-`nhp login --reset` asks again (to change accounts); `nhp logout` forgets
-the session and the saved credentials.
+Asks for your portal username and password (not echoed), logs in, and
+remembers both - later commands, and the re-login when the portal's 48-hour
+session expires, happen silently. `nhp login --reset` switches accounts;
+`nhp logout` forgets everything.
 
-**Where things live.** All state goes in a per-user directory, never in the
-checkout, so it survives re-clones and `git` never sees it:
+State lives in a per-user directory, never in the checkout:
 
 | Platform | Directory |
 | --- | --- |
@@ -79,120 +41,86 @@ checkout, so it survives re-clones and `git` never sees it:
 | Override | `NHP_CONFIG_DIR` |
 
 ```
-config.json       { "sellMarginMultiplier": 1.25 }   optional; enables the Sell: line
+config.json       { "sellMarginMultiplier": 1.25 }   optional; enables the SELL column
 credentials.json  saved by `nhp login`
 cookies.json      the portal session
 ```
 
-**How the password is stored.** On Windows it is encrypted with DPAPI in
-the current-user scope, so the file can only be decrypted by your Windows
-account on that machine; copying it elsewhere yields nothing. The CLI does
-this through a short PowerShell script (`ProtectedData`, no cmdlets or
-modules involved), tried in Windows PowerShell 5.1 and then `pwsh`, and only
-when it actually needs to log in. If neither PowerShell works, the password
-is stored as plain text and `nhp login` says so. On Linux and macOS the file
-is plain text with mode `600`.
+On Windows the password is DPAPI-encrypted (current-user scope, so the file
+is useless off-machine); elsewhere the file is plain text with mode `600`.
+For scripts and CI, `NHP_USERNAME`/`NHP_PASSWORD` (and optionally
+`NHP_SELL_MARGIN`, `NHP_CONFIG_DIR`) override the stored files and never
+prompt - with `--json`, `--tsv`, or no terminal, a missing login is an error
+rather than a prompt, so stdout stays clean.
 
-**Scripts and CI.** Environment variables override the stored file and never
-prompt:
+Upgrading from 1.3 or earlier: run `nhp login` once and the old
+module-relative `credentials.json`/`cookies.json` migrate to the state
+directory.
 
-- `NHP_USERNAME`, `NHP_PASSWORD`
-- `NHP_SELL_MARGIN` *(optional)*
-- `NHP_CONFIG_DIR` *(optional)*
+## Commands
 
-With `--json` or `--tsv`, or with no terminal, a missing login is an error
-(`Run 'nhp login'`) rather than a prompt, so stdout stays clean.
+Run `nhp help` for the full reference with flags.
 
-**Upgrading from 1.3 or earlier.** The old `credentials.json` and
-`cookies.json` next to `nhp_cli.js` are still read as a fallback. Run
-`nhp login` once: it moves the credentials (and the margin) into the state
-directory, after which the old files are no longer read and can be deleted.
+**Products & pricing**
 
-### Commands
+- `nhp search <query>` - product search.
+- `nhp price <part>[:qty]...` - price and stock, one ledger line per part.
+  Quantities go on the part (`K144:2 06850863:10`); a bare number is always
+  a part number, and `--qty <n>` sets the default. Unknown parts keep their
+  line with the portal's reason, so rows always match what you asked for.
+- `nhp csv <file>` - the same for a CSV of `partNumber[,qty]` rows (single
+  column works, header rows are skipped).
 
-Run `nhp help` (or `nhp --help`) for the full built-in reference.
+**Orders & invoices**
 
-**Products & Pricing**
+- `nhp orders [page]` - order history ledger (`ORDER PO STATUS DATE`), 20
+  per page. Filters: `--dateFrom`/`--dateTo` (yyyy-mm-dd) plus
+  `--purchaseNumber`/`--documentNumber`/`--orderNumber`/`--customerReference`,
+  which all feed the portal's single free-text search box.
+- `nhp invoices [page]` - invoice history; `--brief` gives the ledger
+  (`INVOICE ORDER PO DATE` - the order column links each invoice to its
+  sales order).
+- `nhp order <id...>` - line items with delivered/ordered quantities and
+  delivery estimates, e.g. `nhp order SOR1314816`. Several ids print one
+  ledger each; a failing id is reported on stderr without sinking the rest.
+- `nhp invoice <id>` - line items for an invoice, e.g. `SIN02755715`.
+- `nhp po <query>` - find orders by PO number; a single match auto-expands
+  like `nhp order`.
 
-- `nhp search <query>` - Search for products matching a query.
-- `nhp price <part>[:qty]... [--full|--tsv]` - Price and stock for one or
-  more part numbers as a ledger, one line per part: `PART  DESCRIPTION  QTY
-  BUY  [SELL]  STOCK` (description truncated to fit, `SELL` only when a
-  margin is configured, stock as glyph + NZ on-hand quantity + state; an
-  unknown part keeps its line with the portal's reason and `✗ NOT FOUND`).
-  Quantities go on the part as `K144:2 06850863:10`; `--qty <n>` is the
-  default for parts without one. A bare number is always a part number.
-  Add `--full` for the record view with discount, AU stock and the rest.
-- `nhp csv <csvFile> [--full|--tsv]` - The same for part numbers listed in a
-  CSV file. Columns: `partNumber[,qty]` - a single-column file of part
-  numbers also works (qty defaults to 1), and a header row is skipped
-  automatically.
+**Cart**
 
-**Orders & Invoices**
+- `nhp cart add <part> [qty]` - add an item. The second argument is a
+  quantity only when it looks like one (1-9999, no leading zero); use
+  `part:qty` for anything else, including bulk adds:
+  `nhp cart add K144:2 06850863:10`. Rejected parts are reported with the
+  portal's reason.
+- `nhp cart list` / `remove <part|line#>` / `update <part|line#> <qty>` /
+  `clear` - inspect and edit the cart. Part numbers win over line numbers
+  when both readings are possible.
+- `nhp cart upload <file>` - add a CSV of parts (same format as `nhp csv`).
 
-- `nhp orders [page] [--full|--tsv]` - Get order history as a compact ledger
-  (`ORDER  PO  STATUS  DATE`, one line per order), 20 per page starting at
-  page 1. Add `--full` for the record view with totals. Optional search
-  flags: `--dateFrom`, `--dateTo` (yyyy-mm-dd), and `--purchaseNumber`,
-  `--documentNumber`, `--orderNumber`, `--customerReference` - the portal
-  has a single free-text search box, so the latter four all feed the same
-  match.
-- `nhp invoices [page] [--brief|--tsv]` - Get invoice history. Accepts the same
-  optional search flags as orders. Add `--brief` for the ledger view
-  (`INVOICE  ORDER  PO  DATE` - the order column links each invoice to the
-  sales order it came from).
-- `nhp order <orderId...> [--full|--tsv]` - Line items for one or more orders
-  (e.g. `SOR1314816`) as a ledger, one line per item: `PART  DESCRIPTION
-  DLV/ORD  STATUS` (description truncated to fit, delivered/ordered quantity
-  coloured green/yellow/red, the status carrying the portal's delivery
-  estimate). Several order IDs print one ledger each, separated by a blank
-  line and led by `Order | PO | Ref | Date`; an order that can't be fetched
-  is reported on stderr without stopping the others, and the command still
-  exits non-zero. With several IDs, `--json` emits an array with one entry
-  per argument (a failure becoming `{ orderId, error }`); a single ID keeps
-  the bare API response. Add `--full` for the record view with header,
-  addresses, prices and totals.
-- `nhp invoice <id> [--brief|--tsv]` - Get detailed line items for a specific
-  invoice (e.g. `SIN02755715`). `--brief` prints `PART  DESCRIPTION  QTY`.
-- `nhp po <query>` - Search order history by PO Number. A single match
-  auto-expands like `nhp order` (ledger, or record view with `--full`).
+There is deliberately no checkout: nothing in this tool can place an order.
 
-**Cart Management**
+**Output modes**, on every command where they make sense:
 
-- `nhp cart add <partNumber> [qty]` - Add an item to the cart. The two-argument
-  form treats the second argument as a quantity only when it is 1-9999 with no
-  leading zero; anything else (e.g. the numeric part number `06850863`) is
-  treated as a second part number. For explicit quantities - including large
-  ones - use the `part:qty` form: `nhp cart add K144:2 06850863:10`.
-- `nhp cart list` - View current items in the cart.
-- `nhp cart remove <partNumber|line#>` - Remove an item, by part number or by
-  the line number shown in `cart list`. Part numbers take priority when both
-  interpretations are possible.
-- `nhp cart update <partNumber|line#> <qty>` - Update the quantity of a cart item.
-- `nhp cart clear` - Empty the entire cart.
-- `nhp cart upload <csvFilePath>` - Add a CSV of part numbers to the cart
-  (same format as `nhp csv`). Parts the portal rejects are reported
-  individually with its reason, and the command exits non-zero.
+- Default: a compact ledger; `--full` for the record view (headers,
+  addresses, totals; the default for `invoices`/`invoice`, which take
+  `--brief` for the ledger).
+- `--tsv`: spreadsheet export (below).
+- `--json`: the raw API response on stdout, everything else on stderr.
 
-**Authentication**
+Failed operations exit non-zero, so the CLI is safe to script against.
 
-- `nhp login [--reset]` - Log in and save the session. Asks for the username
-  and password the first time (or with `--reset`) and remembers them;
-  otherwise re-logs in with the saved ones. `--json` reports the username,
-  where the credentials came from, and the file paths.
-- `nhp logout` - Forget the saved session and credentials.
-
-### Spreadsheet Export (`--tsv`)
+## Spreadsheet export (`--tsv`)
 
 `price`, `csv`, `orders`, `order`, `invoices`, `invoice` and `po` take
-`--tsv`: one header row and one tab-separated row per record (per line item
-for `order`/`invoice`, across every order given), with the order- or
-invoice-level fields repeated on each row so the result is a flat table.
-Plain text only - no colour, glyphs, truncation, or progress line; money and
-quantities are bare numbers - so it pastes straight into columns:
+`--tsv`: one header row, one tab-separated row per record (per line item for
+`order`/`invoice`, parent fields repeated so the result is a flat table).
+Plain text, no colour or truncation, money and quantities as bare numbers -
+it pastes straight into columns:
 
 ```powershell
-nhp order SOR1000001 SOR1000002 --tsv | Set-Clipboard        # then paste into Excel/Sheets
+nhp order SOR1000001 SOR1000002 --tsv | Set-Clipboard        # paste into Excel/Sheets
 nhp invoices --dateFrom 2026-07-01 --tsv | Set-Clipboard
 nhp price K144 06850863 --tsv | ConvertFrom-Csv -Delimiter "`t"   # PowerShell objects
 ```
@@ -207,28 +135,13 @@ invoices    INVOICE  PO  REF  STATUS  DATE  TOTAL  OUTSTANDING
 invoice     INVOICE  PO  REF  DATE  LINE  PART  DESCRIPTION  QTY  UNIT PRICE  TOTAL
 ```
 
-`STOCK` is the NZ on-hand quantity and `STOCK STATUS` the badge text; `LIST`
-is the undiscounted price from the part's price break and `CURRENCY` always
-`NZD`; `SELL` is filled only when `sellMarginMultiplier` is configured;
-`LINE` is the portal's own line number. Dates are `dd/mm/yyyy` as in every
-other view. Failures behave as in the human view (stderr, non-zero exit) and
-contribute no rows. `--tsv` wins over `--full`/`--brief`, `--json` wins over
-both.
+`STOCK` is the NZ on-hand quantity; `LIST` the undiscounted price break;
+`SELL` is filled only when `sellMarginMultiplier` is configured. Dates are
+`dd/mm/yyyy` everywhere. Failures still go to stderr with a non-zero exit
+and contribute no rows. `--tsv` wins over `--full`/`--brief`; `--json` wins
+over both.
 
-### JSON Output & Exit Codes
-
-You can append `--json` to any command to receive the raw JSON response on
-stdout instead of the formatted terminal output. Progress and error messages go
-to stderr, so stdout stays valid JSON for piping:
-
-```bash
-nhp orders 1 --purchaseNumber PO-12345 --json > orders.json
-```
-
-Failed operations (unknown part numbers on `cart add`, items not found, API
-errors) exit with a non-zero status code, so the CLI is safe to script against.
-
-### Portal Quirks
+## Portal quirks
 
 The portal was rebuilt in September 2026 (Next.js over a REST API at
 `/api/v1/`); these are the undocumented behaviours of the new backend:
@@ -262,143 +175,71 @@ The portal was rebuilt in September 2026 (Next.js over a REST API at
   `d/M/yyyy` inside text like `Est. Delivery: 22/09/2026`. Every printed
   date goes through `formatDate`, which normalises both to `dd/mm/yyyy`.
 
----
+## Library usage
 
-## Library API Usage
-
-You can also integrate this package directly into your own JavaScript
-applications.
-
-### Import the Library
-
-In Deno (or standard ES module environments), simply import the entry point
-`mod.js`.
+`mod.js` re-exports the client for programmatic use. By default it resolves
+credentials the way the CLI does (env vars, then the stored file) and keeps
+the session in the same state directory.
 
 ```javascript
 import { NHPClient } from "./mod.js";
-```
 
-### Initialization
-
-Create a new instance of the client. By default it resolves credentials the
-way the CLI does (environment variables, then the file `nhp login` saved)
-and keeps the session in the same state directory (see Setup).
-
-```javascript
 const client = new NHPClient({
-  // Optional configuration overrides:
+  // All optional:
   cookiePath: "./data/custom_cookies.json",
-  credentials: {
-    username: "your_email@example.com",
-    password: "your_password",
-  },
-  timeoutMs: 30000, // Per-request timeout (default 30s)
-  silent: true, // Set to true to suppress internal console log messages
+  credentials: { username: "you@example.com", password: "..." },
+  timeoutMs: 30000,
+  silent: true,
 });
-
-// Always call ensureLogin() before making API calls
 await client.ensureLogin();
 ```
 
-`credentials` may also be an async function; it is called only when a login
-is actually needed, so an expensive lookup (a keychain, a prompt) does not
-run on every command. `onLogin(creds)` is called after each successful
-login. The `store` export has the pieces the CLI uses: `resolveCredentials`,
-`saveCredentials`, `dpapiProtect`/`dpapiUnprotect`, `configDir`.
+`credentials` may also be an async provider, called only when a login is
+actually needed; `onLogin(creds)` fires after each successful login. Every
+request carries a timeout and re-authenticates once automatically if the
+session has expired. The `store` export has the credential plumbing
+(`resolveCredentials`, `saveCredentials`, `dpapiProtect`/`dpapiUnprotect`,
+`configDir`).
 
-All requests carry a timeout and automatically re-authenticate once if the
-saved session has expired.
+### Methods
 
-### API Methods
+**`searchProducts(query)`** - product search; results in
+`results.widgets[0].content`.
 
-#### `searchProducts(query)`
-
-Searches for products matching a keyword.
-
-```javascript
-const results = await client.searchProducts("battery");
-console.log(results.widgets[0].content); // Array of products
-```
-
-#### `getPriceAndStock(products)`
-
-Fetches product records and stock availability in parallel and stitches them
-per requested item. Expects an array of objects containing `itemId` (the part
-number) and `qty`. An unknown part keeps its entry with `error` set instead
-of throwing, so results always line up with the request.
+**`getPriceAndStock(items)`** - takes `[{ itemId, qty }]`, fetches product
+records and availability in parallel, and returns one entry per requested
+item. Unknown parts get `error` set instead of throwing, so results always
+line up with the request. `getProducts(itemIds)` and
+`getAvailability(itemIds)` expose the two halves individually.
 
 ```javascript
-const items = [
-  { itemId: "TPHS25R5GM", qty: 1 },
-  { itemId: "1756BA1", qty: 5 },
-];
-const pricing = await client.getPriceAndStock(items);
-
+const pricing = await client.getPriceAndStock([{ itemId: "K144", qty: 5 }]);
 for (const entry of pricing.products) {
-  if (entry.error) continue; // Unknown part - the portal's reason is in entry.error
+  if (entry.error) continue; // the portal's reason for an unknown part
   const brk = entry.product.priceBreaks[0];
-  console.log(`Buy: ${brk.discountedPrice}  List: ${brk.price}`);
   const nz = entry.availability.stockQuantities.find((s) => s.type === "national");
-  console.log(`NZ Stock: ${nz?.quantity ?? 0}`);
+  console.log(`Buy: ${brk.discountedPrice}  List: ${brk.price}  NZ stock: ${nz?.quantity ?? 0}`);
 }
 ```
 
-`getProducts(itemIds)` and `getAvailability(itemIds)` expose the two halves
-individually.
-
-#### `getOrders(pageSize, page, options)`
-
-Fetches the user's order history (pages are 1-based). Responses are
-`{ items, meta }` with `meta` carrying `page`, `totalPages` and `totalCount`.
-The `options` object takes `dateFrom`/`dateTo` (yyyy-mm-dd) and a free-text
-`search` (`purchaseNumber`, `documentNumber`, `orderNumber` and
-`customerReference` are accepted as aliases - the portal has one search box).
+**`getOrders(pageSize, page, options)`** / **`getInvoices(...)`** /
+**`getBackorders(...)`** - history listings, 1-based pages, returning
+`{ items, meta }` (`meta` carries `page`, `totalPages`, `totalCount`).
+`options` takes `dateFrom`/`dateTo` (yyyy-mm-dd) and a free-text `search`
+(`purchaseNumber` etc. are accepted as aliases for it).
 
 ```javascript
-// Get the first 20 orders
-const orders = await client.getOrders(20, 1);
-
-// Search for a specific Purchase Order number and date range
-const poOrders = await client.getOrders(20, 1, {
-  purchaseNumber: "PO-12345",
-  dateFrom: "2025-12-01",
-  dateTo: "2025-12-06",
-});
+const orders = await client.getOrders(20, 1, { purchaseNumber: "PO-12345" });
 ```
 
-#### `getInvoices(pageSize, page, options)`
+**`getOrderDetails(orderId)`** - order header plus `lineItems` with shipping
+status and delivery estimates, for a sales order number (composite list ids
+are normalised).
 
-Fetches the user's invoice history. The `options` object accepts the same
-search filters as `getOrders`. `getBackorders(pageSize, page)` lists open
-backorder lines the same way.
+**`getInvoiceDetails(invoiceId)`** - `{ header, lineItems }` for an invoice
+number.
 
-```javascript
-const invoices = await client.getInvoices(20, 1, { dateFrom: "2026-01-01" });
-```
-
-#### `getOrderDetails(orderId)`
-
-Fetches the order header and line items (with shipping status and delivery
-estimates) for a sales order number. The composite ids the order list
-returns are accepted and normalised.
-
-```javascript
-const details = await client.getOrderDetails("SOR1314816");
-console.log(details.lineItems);
-```
-
-#### `getInvoiceDetails(invoiceId)`
-
-Fetches `{ header, lineItems }` for an invoice number.
-
-```javascript
-const { header, lineItems } = await client.getInvoiceDetails("SIN02755715");
-```
-
-#### Cart Management
-
-The library provides complete functionality to manage the user's shopping
-cart. Mutations respond with the updated cart state.
+**Cart** - mutations respond with the updated cart state:
 
 ```javascript
 await client.addToCart("115797", 2);
@@ -407,9 +248,8 @@ await client.updateCartLineQuantity(cart.lineItems[0], 5);
 await client.removeCartLine(cart.lineItems[0].id);
 await client.clearCart();
 
-// Bulk adds report per-item outcomes:
 const result = await client.uploadCartCsv("./bulk_order.csv");
-// -> { success: boolean, requested: string[], missing: string[], Warnings: string[] }
+// -> { success, requested: string[], missing: string[], Warnings: string[] }
 ```
 
 ## Development
