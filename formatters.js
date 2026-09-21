@@ -1,10 +1,9 @@
 import { blue, bold, cyan, dim, green, magenta, red, stripAnsiCode, yellow } from "jsr:@std/fmt@^1/colors";
 
-// Every printed date is dd/mm/yyyy (NZ locale). The
-// portal gives d/M/yyyy without zero padding ("3/09/2026", day first - the
-// 28/08/2026 entries prove the order); ISO is accepted too. Anything that
-// isn't a date passes through unchanged, so this is safe to run over every
-// scraped header value.
+// Every printed date is dd/mm/yyyy (NZ locale). The API gives ISO timestamps;
+// unpadded d/M/yyyy is still accepted (it appears inside line-status strings
+// like "Est. Delivery: 22/09/2026"). Anything that isn't a date passes
+// through unchanged, so this is safe to run over any header value.
 export function formatDate(value) {
   if (!value) return '';
   const s = String(value);
@@ -13,6 +12,22 @@ export function formatDate(value) {
   const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
   return s;
+}
+
+// Money: the API gives bare numbers. "$1,234.56"; null for anything else, so
+// callers can fall back to N/A rather than printing $NaN.
+function fmtMoney(value) {
+  const n = typeof value === 'number' ? value : parseFloat(value);
+  if (isNaN(n)) return null;
+  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// Order statuses are enums (ORDER_RECEIVED, IN_PROGRESS, ON_HOLD, COMPLETED,
+// CANCELLED); print them as words. Other strings pass through.
+export function humanStatus(value) {
+  const s = String(value ?? '');
+  if (!/^[A-Z0-9_]+$/.test(s)) return s;
+  return s.split('_').map((w) => w.charAt(0) + w.slice(1).toLowerCase()).join(' ');
 }
 
 export function printProducts(products, logger) {
@@ -30,53 +45,83 @@ export function printProducts(products, logger) {
   }
 }
 
-export function printPricing(results, originalRequests = [], config = {}, logger) {
+// ---------------------------------------------------------------------------
+// Pricing. Input is getPriceAndStock's per-request entries:
+//   { itemId, qty, product, availability, error }
+// product.priceBreaks carries the money (price = list, discountedPrice = the
+// account's buy price); availability.stockQuantities carries the stock (the
+// "national" entry is NZ, the rest are AU warehouses).
+// ---------------------------------------------------------------------------
+
+// The quantity-tiered price break that applies to the requested qty: the
+// highest tier at or below it, else the lowest tier.
+function pickPriceBreak(product, qty) {
+  const breaks = (product?.priceBreaks || []).slice().sort((a, b) => (a.quantity || 0) - (b.quantity || 0));
+  if (breaks.length === 0) return null;
+  let chosen = breaks[0];
+  for (const b of breaks) {
+    if ((b.quantity || 0) <= qty) chosen = b;
+  }
+  return chosen;
+}
+
+function priceView(entry) {
+  const { product, availability } = entry;
+  const brk = pickPriceBreak(product, entry.qty);
+  const stocks = availability?.stockQuantities || [];
+  const nz = stocks.find((s) => s.type === "national");
+  const auQty = stocks.filter((s) => s.type !== "national").reduce((sum, s) => sum + (s.quantity || 0), 0);
+  return {
+    desc: product?.displayName || product?.name || null,
+    buy: brk ? (brk.discountedPrice ?? brk.salePrice ?? brk.price) : null,
+    list: brk ? brk.price : null,
+    nzQty: nz ? nz.quantity || 0 : 0,
+    auQty,
+  };
+}
+
+export function printPricing(results, config = {}, logger) {
   if (!results || results.length === 0) {
     logger.log(yellow(`No pricing results returned.`));
     return;
   }
   logger.log(`\n${bold(cyan("=================== PRICING & STOCK ==================="))}`);
-  for (const prod of results) {
-    const orig = originalRequests.find(p => p.itemId.toLowerCase() === prod.ProductId.toLowerCase());
-    const requestedQty = orig ? orig.qty : 1;
-    
-    if (prod.HasError || prod.ProductExist === false) {
-      logger.log(` ${bold(blue("•"))} ${bold("Item:")} ${cyan(prod.ProductId)} ${dim(`(Req Qty: ${requestedQty})`)}${red(bold(" [ NOT FOUND ]"))}`);
-      const reason = prod.ErrorMessages?.length ? prod.ErrorMessages.join("; ") : "Item not recognised.";
-      logger.log(`   ${red(reason)}`);
+  for (const entry of results) {
+    if (entry.error) {
+      logger.log(` ${bold(blue("•"))} ${bold("Item:")} ${cyan(entry.itemId)} ${dim(`(Req Qty: ${entry.qty})`)}${red(bold(" [ NOT FOUND ]"))}`);
+      logger.log(`   ${red(entry.error)}`);
       logger.log(dim(`-------------------------------------------------------`));
       continue;
     }
 
-    const nzStock = parseInt(prod.OnHandQty, 10) || 0;
-    const stockBadge = nzStock > 0 ? green(bold(" [ IN STOCK ]")) : red(bold(" [ OUT OF STOCK ]"));
+    const view = priceView(entry);
+    const stockBadge = view.nzQty > 0 ? green(bold(" [ IN STOCK ]")) : red(bold(" [ OUT OF STOCK ]"));
 
-    logger.log(` ${bold(blue("•"))} ${bold("Item:")} ${cyan(prod.ProductId)} ${dim(`(Req Qty: ${requestedQty})`)}${stockBadge}`);
-    logger.log(`   ${bold("Desc:")} ${prod.Description || prod.DisplayName || 'N/A'}`);
+    logger.log(` ${bold(blue("•"))} ${bold("Item:")} ${cyan(entry.itemId)} ${dim(`(Req Qty: ${entry.qty})`)}${stockBadge}`);
+    logger.log(`   ${bold("Desc:")} ${view.desc || 'N/A'}`);
 
-    const buyPrice = prod.AdjustedPriceWithCurrency || (prod.NetPrice != null ? `$${prod.NetPrice}` : 'N/A');
-    logger.log(`   ${bold("Buy:")}  ${green(buyPrice)}`);
+    const buyStr = fmtMoney(view.buy);
+    logger.log(`   ${bold("Buy:")}  ${green(buyStr || 'N/A')}`);
 
-    if (config.sellMarginMultiplier !== null && config.sellMarginMultiplier !== undefined) {
-      const sellPriceNum = parseFloat(buyPrice.replace(/[^0-9.]/g, '')) * config.sellMarginMultiplier;
-      if (!isNaN(sellPriceNum)) {
-        logger.log(`   ${bold("Sell:")} ${yellow(`$${sellPriceNum.toFixed(2)}`)}`);
-      }
+    if (config.sellMarginMultiplier !== null && config.sellMarginMultiplier !== undefined && view.buy != null) {
+      const sell = fmtMoney(view.buy * config.sellMarginMultiplier);
+      if (sell) logger.log(`   ${bold("Sell:")} ${yellow(sell)}`);
     }
 
-    if (prod.Discount) logger.log(`   ${bold("Disc:")} ${magenta(prod.Discount)}`);
-    
-    const nzColor = nzStock > 0 ? green : red;
-    logger.log(`   ${bold("NZ Stock:")} ${nzColor(bold(String(prod.OnHandQty)))} ${dim(`(${prod.StockStatusName || prod.StockStatus?.Name || 'Unknown'})`)}`);
-    logger.log(`   ${bold("AU Stock:")} ${dim(String(prod.DCOnHandQty))}`);
+    const listStr = fmtMoney(view.list);
+    if (listStr && view.list !== view.buy) logger.log(`   ${bold("List:")} ${magenta(listStr)}`);
+
+    const nzColor = view.nzQty > 0 ? green : red;
+    logger.log(`   ${bold("NZ Stock:")} ${nzColor(bold(String(view.nzQty)))}`);
+    logger.log(`   ${bold("AU Stock:")} ${dim(String(view.auQty))}`);
     logger.log(dim(`-------------------------------------------------------`));
   }
 }
 
 function getStatusColor(statusStr) {
   const s = (statusStr || '').toLowerCase();
-  if (s.includes('invoiced') || s.includes('complete') || (s.includes('shipped') && !s.includes('partially') && !s.includes('not'))) return green;
-  if (s.includes('partially shipped') || s.includes('processing')) return yellow;
+  if (s.includes('invoiced') || s.includes('complete') || s.includes('delivered') || (s.includes('shipped') && !s.includes('partially') && !s.includes('not'))) return green;
+  if (s.includes('partially shipped') || s.includes('processing') || s.includes('progress') || s.includes('hold') || s.includes('back order') || s.includes('backorder') || s.includes('est. delivery')) return yellow;
   if (s.includes('not shipped') || s.includes('cancel')) return red;
   return cyan;
 }
@@ -87,7 +132,7 @@ function getStatusColor(statusStr) {
 // stock as glyph + on-hand quantity + state. An unknown part keeps its line,
 // with the portal's reason in the description column and NOT FOUND under
 // STOCK, so the rows still line up with what was asked for.
-export function printPriceLedger(results, originalRequests = [], config = {}, logger) {
+export function printPriceLedger(results, config = {}, logger) {
   if (!results || results.length === 0) {
     logger.log(yellow(`No pricing results returned.`));
     return;
@@ -98,30 +143,28 @@ export function printPriceLedger(results, originalRequests = [], config = {}, lo
   header.push("STOCK");
   logger.log(dim(header.join(" ")));
 
-  for (const prod of results) {
-    const orig = originalRequests.find((p) => p.itemId.toLowerCase() === (prod.ProductId || '').toLowerCase());
-    const qty = padText(String(orig ? orig.qty : 1), 5);
-    const code = padText(cyan(truncateText(prod.ProductId || 'Unknown', 26)), 26);
+  for (const entry of results) {
+    const qty = padText(String(entry.qty), 5);
+    const code = padText(cyan(truncateText(entry.itemId || 'Unknown', 26)), 26);
 
-    if (prod.HasError || prod.ProductExist === false) {
-      const reason = prod.ErrorMessages?.length ? prod.ErrorMessages.join("; ") : "Item not recognised.";
-      const cells = [code, padText(red(truncateText(reason, BRIEF_DESC_WIDTH)), BRIEF_DESC_WIDTH), qty, padText('', 14)];
+    if (entry.error) {
+      const cells = [code, padText(red(truncateText(entry.error, BRIEF_DESC_WIDTH)), BRIEF_DESC_WIDTH), qty, padText('', 14)];
       if (hasMargin) cells.push(padText('', 12));
       cells.push(red(`${statusGlyph(red)} NOT FOUND`));
       logger.log(cells.join(" "));
       continue;
     }
 
-    const desc = padText(truncateText(prod.Description || prod.DisplayName || 'N/A', BRIEF_DESC_WIDTH), BRIEF_DESC_WIDTH);
-    const buyPrice = prod.AdjustedPriceWithCurrency || (prod.NetPrice != null ? `$${prod.NetPrice}` : 'N/A');
-    const cells = [code, desc, qty, padText(green(buyPrice), 14)];
+    const view = priceView(entry);
+    const desc = padText(truncateText(view.desc || 'N/A', BRIEF_DESC_WIDTH), BRIEF_DESC_WIDTH);
+    const buyStr = fmtMoney(view.buy);
+    const cells = [code, desc, qty, padText(buyStr ? green(buyStr) : dim('N/A'), 14)];
     if (hasMargin) {
-      const sellNum = parseFloat(buyPrice.replace(/[^0-9.]/g, '')) * config.sellMarginMultiplier;
-      cells.push(padText(isNaN(sellNum) ? dim('N/A') : yellow(`$${sellNum.toFixed(2)}`), 12));
+      const sell = view.buy != null ? fmtMoney(view.buy * config.sellMarginMultiplier) : null;
+      cells.push(padText(sell ? yellow(sell) : dim('N/A'), 12));
     }
-    const nzStock = parseInt(prod.OnHandQty, 10) || 0;
-    const stockColor = nzStock > 0 ? green : red;
-    cells.push(stockColor(`${statusGlyph(stockColor)} ${nzStock} ${nzStock > 0 ? 'IN STOCK' : 'OUT OF STOCK'}`));
+    const stockColor = view.nzQty > 0 ? green : red;
+    cells.push(stockColor(`${statusGlyph(stockColor)} ${view.nzQty} ${view.nzQty > 0 ? 'IN STOCK' : 'OUT OF STOCK'}`));
     logger.log(cells.join(" "));
   }
 }
@@ -142,19 +185,19 @@ export function printOrders(orders, logger, brief = false) {
   if (!brief) logger.log(`\n${bold(cyan("======================= ORDERS ======================="))}`);
   else logger.log(dim(`${padText("ORDER", 15)} ${padText("PO", 25)} ${padText("STATUS", 24)} DATE`));
   for (const order of orders) {
-    const status = order.OrderStatus || order.Status || '';
+    const status = humanStatus(order.status || '');
     const statusColor = getStatusColor(status);
 
     if (brief) {
-      const orderId = padText(cyan(order.OrderId || order.OrderID || ''), 15);
-      const poStr = padText(yellow(order.PurchaseNumber || 'N/A'), 25);
+      const orderId = padText(cyan(order.orderNo || ''), 15);
+      const poStr = padText(yellow(order.poNumber || 'N/A'), 25);
       const statusStr = padText(statusColor(`${statusGlyph(statusColor)} ${status}`), 24);
-      logger.log(`${orderId} ${poStr} ${statusStr} ${dim(formatDate(order.OrderDate) || 'Unknown')}`);
+      logger.log(`${orderId} ${poStr} ${statusStr} ${dim(formatDate(order.orderDate) || 'Unknown')}`);
     } else {
-      logger.log(` ${bold(blue("•"))} ${bold("Order ID:")} ${cyan(order.OrderId || order.OrderID)}`);
-      logger.log(`   ${bold("PO:")}       ${yellow(order.PurchaseNumber || 'N/A')}`);
-      logger.log(`   ${bold("Date:")}     ${formatDate(order.OrderDate) || 'Unknown'}`);
-      logger.log(`   ${bold("Total:")}    ${green(order.TotalText || order.Total || '$0.00')}`);
+      logger.log(` ${bold(blue("•"))} ${bold("Order ID:")} ${cyan(order.orderNo)}`);
+      logger.log(`   ${bold("PO:")}       ${yellow(order.poNumber || 'N/A')}`);
+      logger.log(`   ${bold("Date:")}     ${formatDate(order.orderDate) || 'Unknown'}`);
+      logger.log(`   ${bold("Total:")}    ${green(fmtMoney(order.total) || 'N/A')}`);
       logger.log(`   ${bold("Status:")}   ${statusColor(status)}`);
       logger.log(dim(`------------------------------------------------------`));
     }
@@ -166,27 +209,27 @@ export function printInvoices(invoices, logger, brief = false) {
     logger.log(yellow(`No invoices found.`));
     return;
   }
+  // The backend's invoice status is an opaque code the portal itself never
+  // displays, so it is not shown here either; the ledger column carries the
+  // related order number instead, which links an invoice back to its order.
   if (!brief) logger.log(`\n${bold(cyan("======================= INVOICES ======================="))}`);
-  else logger.log(dim(`${padText("INVOICE", 15)} ${padText("PO", 25)} ${padText("STATUS", 24)} DATE`));
+  else logger.log(dim(`${padText("INVOICE", 15)} ${padText("ORDER", 15)} ${padText("PO", 25)} DATE`));
   for (const inv of invoices) {
-    const status = inv.OrderStatus || inv.Status || '';
-    const statusColor = getStatusColor(status);
-
     if (brief) {
-      const invId = padText(cyan(inv.DocumentNumber || ''), 15);
-      const poStr = padText(yellow(inv.PurchaseNumber || 'N/A'), 25);
-      const statusStr = padText(statusColor(`${statusGlyph(statusColor)} ${status}`), 24);
-      logger.log(`${invId} ${poStr} ${statusStr} ${dim(formatDate(inv.InvoiceDate) || 'Unknown')}`);
+      const invId = padText(cyan(inv.invoiceId || ''), 15);
+      const orderStr = padText(cyan(inv.salesId || 'N/A'), 15);
+      const poStr = padText(yellow(inv.customerRequisition || 'N/A'), 25);
+      logger.log(`${invId} ${orderStr} ${poStr} ${dim(formatDate(inv.invoiceDate) || 'Unknown')}`);
     } else {
-      logger.log(` ${bold(blue("•"))} ${bold("Invoice No:")} ${cyan(inv.DocumentNumber)}`);
-      logger.log(`   ${bold("PO Number:")}  ${inv.PurchaseNumber || 'N/A'} ${dim(`(${inv.CustomerReference || 'No Ref'})`)}`);
-      logger.log(`   ${bold("Date:")}       ${formatDate(inv.InvoiceDate) || 'Unknown'}`);
-      logger.log(`   ${bold("Total:")}      ${green(inv.TotalText || '$0.00')}`);
-      
-      if (inv.OutstandingText && inv.OutstandingText !== '$0.00') {
-          logger.log(`   ${bold("Outst:")}      ${red(inv.OutstandingText)}`);
+      logger.log(` ${bold(blue("•"))} ${bold("Invoice No:")} ${cyan(inv.invoiceId)}`);
+      logger.log(`   ${bold("PO Number:")}  ${inv.customerRequisition || 'N/A'} ${dim(`(${inv.customerReference || 'No Ref'})`)}`);
+      logger.log(`   ${bold("Order:")}      ${inv.salesId || 'N/A'}`);
+      logger.log(`   ${bold("Date:")}       ${formatDate(inv.invoiceDate) || 'Unknown'}`);
+      logger.log(`   ${bold("Total:")}      ${green(fmtMoney(inv.total) || 'N/A')}`);
+      const outstanding = fmtMoney(inv.outstanding);
+      if (outstanding && outstanding !== '$0.00') {
+        logger.log(`   ${bold("Outst:")}      ${red(outstanding)}`);
       }
-      logger.log(`   ${bold("Status:")}     ${statusColor(status)}`);
       logger.log(dim(`------------------------------------------------------`));
     }
   }
@@ -215,174 +258,207 @@ function printHeaderGrid(entries, cols = 2, keyWidth = 25, valWidth = 25, logger
 function printAddressesGrid(addresses, width = 35, logger) {
   const colKeys = Object.keys(addresses);
   if (colKeys.length === 0) return;
-  
+
   const headerRow = colKeys.map(k => padText(bold(blue(k + ":")), width));
   logger.log('   ' + headerRow.join(''));
-  
+
   const columnsData = colKeys.map(k => addresses[k] ? addresses[k].split('\n').map(l => l.trim()) : []);
   const maxLines = Math.max(...columnsData.map(c => c.length));
-  
+
   for (let i = 0; i < maxLines; i++) {
     const row = columnsData.map(col => padText(dim(col[i] || ""), width));
     logger.log('   ' + row.join(''));
   }
 }
 
-export function printOrderDetails(data, orderId, logger) {
-  const { header, addresses, items } = data || {};
+// ---------------------------------------------------------------------------
+// Order/invoice details. The API returns structured records; these views
+// flatten them to what the printers and exports share:
+//   { id, po, ref, date, status, header, addresses, totals, items }
+// with items as { code, desc, unitPrice, qty, remainingQty?, total, uom?,
+// status?, shipping }. Order lines carry shipping state (remainingQty, ETA);
+// invoice lines don't.
+// ---------------------------------------------------------------------------
 
-  const headerEntries = Object.entries(header || {}).filter(([, v]) => v);
-  const filledAddresses = {};
-  for (const [k, v] of Object.entries(addresses || {})) {
-    if (v) filledAddresses[k] = v;
-  }
+// GET /orders/{id}: header fields flattened on the object + lineItems.
+// netPrice is the account's unit price (unitPrice is list).
+export function orderDetailView(data) {
+  const items = (data?.lineItems || []).map((l) => ({
+    code: l.itemId || '',
+    desc: l.itemName || '',
+    unitPrice: l.netPrice ?? l.unitPrice,
+    qty: l.qty,
+    remainingQty: l.remainingQty,
+    total: l.lineAmount,
+    uom: l.unitOfMeasureDescription || l.unitOfMeasureId || '',
+    status: l.eta || l.lineStatus || (l.isBackOrder ? 'Back Order' : ''),
+    shipping: true,
+  }));
+  const header = {
+    "Order No": data?.salesId,
+    "Status": humanStatus(data?.status),
+    "PO Number": data?.pONumber,
+    "Reference": data?.customerReference || data?.customerRequisition,
+    "Order Date": data?.orderDate,
+    "Requested Ship": data?.requestedShipDate,
+    "Delivery Mode": data?.modeOfDeliveryName,
+    "Contact": data?.contactName,
+  };
+  const addresses = {};
+  if (data?.deliveryAddress) addresses["Delivery Address"] = [data.deliveryName, data.deliveryAddress].filter(Boolean).join('\n');
+  return {
+    id: data?.salesId,
+    po: data?.pONumber || '',
+    ref: data?.customerReference || data?.customerRequisition || '',
+    date: data?.orderDate,
+    status: humanStatus(data?.status),
+    header,
+    addresses,
+    totals: { subTotal: data?.subTotal, taxTotal: data?.taxTotal, total: data?.total },
+    items,
+  };
+}
 
-  if ((!items || items.length === 0) && headerEntries.length === 0 && Object.keys(filledAddresses).length === 0) {
-    logger.log(yellow(`No details found for order ${orderId}. The order may not exist.`));
+// GET /invoices/{id}/line-items: { header, lineItems }.
+export function invoiceDetailView(data) {
+  const h = data?.header || {};
+  const items = (data?.lineItems || []).map((l) => ({
+    code: l.itemId || '',
+    desc: l.itemName || '',
+    unitPrice: l.netPrice ?? l.unitPrice,
+    qty: l.quantity,
+    total: l.lineAmount,
+    status: l.lineStatus || '',
+    shipping: false,
+  }));
+  const header = {
+    "Invoice No": h.invoiceId,
+    "Order No": h.salesId,
+    "PO Number": h.customerRequisition,
+    "Reference": h.customerReference,
+    "Invoice Date": h.invoiceDate,
+    "Contact": h.contactName,
+  };
+  const addresses = {};
+  if (h.deliveryAddress) addresses["Delivery Address"] = [h.deliveryName, h.deliveryAddress].filter(Boolean).join('\n');
+  return {
+    id: h.invoiceId,
+    po: h.customerRequisition || '',
+    ref: h.customerReference || '',
+    date: h.invoiceDate,
+    status: humanStatus(h.status),
+    header,
+    addresses,
+    totals: { subTotal: h.subTotal, taxTotal: h.taxTotal, total: h.total },
+    items,
+  };
+}
+
+function printDetailRecord(view, kind, id, logger) {
+  const headerEntries = Object.entries(view.header || {}).filter(([, v]) => v !== null && v !== undefined && v !== '');
+
+  if ((!view.items || view.items.length === 0) && headerEntries.length === 0) {
+    logger.log(yellow(`No details found for ${kind.toLowerCase()} ${id}. The ${kind.toLowerCase()} may not exist.`));
     return;
   }
 
   if (headerEntries.length > 0) {
-    logger.log(`\n${bold(cyan("================== ORDER HEADER =================="))}`);
+    logger.log(`\n${bold(cyan(`================== ${kind.toUpperCase()} HEADER ==================`))}`);
     printHeaderGrid(headerEntries, 2, 26, 25, logger);
   }
 
-  if (Object.keys(filledAddresses).length > 0) {
-    logger.log(`\n${bold(cyan("================= ORDER ADDRESSES ================="))}`);
-    printAddressesGrid(filledAddresses, 35, logger);
+  if (Object.keys(view.addresses || {}).length > 0) {
+    logger.log(`\n${bold(cyan(`================= ${kind.toUpperCase()} ADDRESSES =================`))}`);
+    printAddressesGrid(view.addresses, 35, logger);
   }
 
-  if (items && items.length > 0) {
-    logger.log(`\n${bold(cyan("=================== ORDER ITEMS ==================="))}`);
-    let grandTotal = 0;
-    for (const item of items) {
-      logger.log(` ${bold(blue("•"))} ${padText(bold("Item:"), 12)} ${cyan(item.ProductCode)}`);
-      logger.log(`   ${padText(bold("Desc:"), 12)} ${item.Description}`);
-      logger.log(`   ${padText(bold("Price:"), 12)} ${green(item.UnitPrice)}`);
-      
-      const qtyVal = parseInt(item.Quantity, 10);
-      const remVal = parseInt(item.RemainingQuantity, 10);
-      
-      const qtyColor = qtyVal > 0 ? cyan : (s) => s;
-      let remColor = (s) => s;
-      if (remVal === 0) remColor = green;
-      else if (remVal > 0 && remVal < qtyVal) remColor = yellow;
-      else if (remVal === qtyVal) remColor = red;
+  if (view.items && view.items.length > 0) {
+    logger.log(`\n${bold(cyan(`=================== ${kind.toUpperCase()} ITEMS ===================`))}`);
+    for (const item of view.items) {
+      logger.log(` ${bold(blue("•"))} ${padText(bold("Item:"), 12)} ${cyan(item.code)}`);
+      logger.log(`   ${padText(bold("Desc:"), 12)} ${item.desc}`);
+      logger.log(`   ${padText(bold("Price:"), 12)} ${green(fmtMoney(item.unitPrice) || 'N/A')}`);
 
-      logger.log(`   ${padText(bold("Ordered:"), 12)} ${qtyColor(bold(item.Quantity))} ${item.UOM}`);
-      logger.log(`   ${padText(bold("Remaining:"), 12)} ${remColor(bold(item.RemainingQuantity))} ${item.UOM}`);
-      logger.log(`   ${padText(bold("Total:"), 12)} ${green(item.Total)}`);
-      
-      const statusColor = getStatusColor(item.Status);
-      logger.log(`   ${padText(bold("Status:"), 12)} ${statusColor(item.Status)}`);
+      if (item.shipping) {
+        const qtyVal = item.qty ?? 0;
+        const remVal = item.remainingQty ?? 0;
+        const qtyColor = qtyVal > 0 ? cyan : (s) => s;
+        let remColor = (s) => s;
+        if (remVal === 0) remColor = green;
+        else if (remVal > 0 && remVal < qtyVal) remColor = yellow;
+        else if (remVal === qtyVal) remColor = red;
+        logger.log(`   ${padText(bold("Ordered:"), 12)} ${qtyColor(bold(String(qtyVal)))} ${item.uom}`);
+        logger.log(`   ${padText(bold("Remaining:"), 12)} ${remColor(bold(String(remVal)))} ${item.uom}`);
+      } else {
+        const qtyColor = (item.qty ?? 0) > 0 ? cyan : dim;
+        logger.log(`   ${padText(bold("Qty:"), 12)} ${qtyColor(bold(String(item.qty ?? 0)))}`);
+      }
+      logger.log(`   ${padText(bold("Total:"), 12)} ${green(fmtMoney(item.total) || 'N/A')}`);
+
+      if (item.status) {
+        const statusColor = getStatusColor(item.status);
+        logger.log(`   ${padText(bold("Status:"), 12)} ${statusColor(item.status)}`);
+      }
       logger.log(dim(`---------------------------------------------------`));
-
-      const totalStr = item.Total || "0";
-      const num = parseFloat(totalStr.replace(/[^0-9.-]+/g, ''));
-      if (!isNaN(num)) grandTotal += num;
     }
-    
-    logger.log(`\n${bold(cyan("ORDER TOTAL"))}`);
-    logger.log(`   ${padText(bold("Total Cost:"), 12)} ${green(bold('$' + grandTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})))}`);
+
+    logger.log(`\n${bold(cyan(`${kind.toUpperCase()} TOTAL`))}`);
+    const t = view.totals || {};
+    if (t.subTotal != null) logger.log(`   ${padText(bold("Subtotal:"), 12)} ${green(fmtMoney(t.subTotal))}`);
+    if (t.taxTotal != null) logger.log(`   ${padText(bold("Tax:"), 12)} ${green(fmtMoney(t.taxTotal))}`);
+    logger.log(`   ${padText(bold("Total:"), 12)} ${green(bold(fmtMoney(t.total) || 'N/A'))}`);
     logger.log(dim(`===================================================`));
   } else {
-    logger.log(yellow(`No items found for order ${orderId}.`));
+    logger.log(yellow(`No items found for ${kind.toLowerCase()} ${id}.`));
   }
+}
+
+export function printOrderDetails(data, orderId, logger) {
+  printDetailRecord(orderDetailView(data), "Order", orderId, logger);
 }
 
 export function printInvoiceDetails(data, invoiceId, logger) {
-  const { header, addresses, items } = data || {};
-
-  const headerEntries = Object.entries(header || {}).filter(([, v]) => v);
-  const filledAddresses = {};
-  for (const [k, v] of Object.entries(addresses || {})) {
-    if (v) filledAddresses[k] = v;
-  }
-
-  if ((!items || items.length === 0) && headerEntries.length === 0 && Object.keys(filledAddresses).length === 0) {
-    logger.log(yellow(`No details found for invoice ${invoiceId}. The invoice may not exist.`));
-    return;
-  }
-
-  if (headerEntries.length > 0) {
-    logger.log(`\n${bold(cyan("================= INVOICE HEADER ================="))}`);
-    printHeaderGrid(headerEntries, 2, 26, 25, logger);
-  }
-
-  if (Object.keys(filledAddresses).length > 0) {
-    logger.log(`\n${bold(cyan("================ INVOICE ADDRESSES ================"))}`);
-    printAddressesGrid(filledAddresses, 35, logger);
-  }
-
-  if (items && items.length > 0) {
-    logger.log(`\n${bold(cyan("================== INVOICE ITEMS =================="))}`);
-    let grandTotal = 0;
-    for (const item of items) {
-      logger.log(` ${bold(blue("•"))} ${padText(bold("Item:"), 12)} ${cyan(item.ProductCode)}`);
-      logger.log(`   ${padText(bold("Desc:"), 12)} ${item.Description}`);
-      logger.log(`   ${padText(bold("Price:"), 12)} ${green(item.UnitPrice)}`);
-      
-      const qtyVal = parseInt(item.Quantity, 10);
-      const qtyColor = qtyVal > 0 ? cyan : dim;
-      logger.log(`   ${padText(bold("Qty:"), 12)} ${qtyColor(bold(item.Quantity))}`);
-      logger.log(`   ${padText(bold("Total:"), 12)} ${green(item.Total)}`);
-      
-      logger.log(dim(`---------------------------------------------------`));
-
-      const totalStr = item.Total || "0";
-      const num = parseFloat(totalStr.replace(/[^0-9.-]+/g, ''));
-      if (!isNaN(num)) grandTotal += num;
-    }
-    
-    logger.log(`\n${bold(cyan("================= INVOICE TOTAL ==================="))}`);
-    logger.log(`   ${padText(bold("Total Cost:"), 12)} ${green(bold('$' + grandTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})))}`);
-    logger.log(dim(`===================================================`));
-  } else {
-    logger.log(yellow(`No items found for invoice: ${invoiceId}`));
-  }
+  printDetailRecord(invoiceDetailView(data), "Invoice", invoiceId, logger);
 }
 
-export function printBriefItems(data, logger, id, idLabel = "Order") {
-  const { header, items } = data || {};
-  if (!items || items.length === 0) return;
+// The brief item ledger. Takes a detail view (orderDetailView /
+// invoiceDetailView output).
+export function printBriefItems(view, logger, id, idLabel = "Order") {
+  const items = view?.items || [];
+  if (items.length === 0) return;
 
   // The id leads the summary line so stacked ledgers (nhp order A B C) stay
-  // identifiable. It comes from the argument rather than the scraped header,
-  // whose labels differ between orders and invoices.
+  // identifiable. It comes from the argument rather than the response, whose
+  // id fields differ between orders and invoices.
   const summary = [];
   if (id) summary.push(`${dim(idLabel + ":")} ${cyan(String(id))}`);
-  if (header && Object.keys(header).length > 0) {
-    const po = headerField(header, HEADER_PO_KEYS) || "N/A";
-    const ref = headerField(header, HEADER_REF_KEYS) || "N/A";
-    const date = formatDate(headerField(header, HEADER_DATE_KEYS)) || "Unknown";
-    summary.push(`${dim("PO:")} ${yellow(po)}`, `${dim("Ref:")} ${yellow(ref)}`, `${dim("Date:")} ${yellow(date)}`);
-  }
-  if (summary.length > 0) logger.log(` ${summary.join(dim(" | "))}`);
+  summary.push(`${dim("PO:")} ${yellow(view.po || "N/A")}`, `${dim("Ref:")} ${yellow(view.ref || "N/A")}`, `${dim("Date:")} ${yellow(formatDate(view.date) || "Unknown")}`);
+  logger.log(` ${summary.join(dim(" | "))}`);
 
-  // Order items carry shipping columns (RemainingQuantity/Status); invoice
-  // items don't, so the invoice ledger collapses to PART DESCRIPTION QTY.
-  const shipping = items.some(i => i.RemainingQuantity !== undefined || i.Status !== undefined);
+  // Order items carry shipping columns (remainingQty/status); invoice items
+  // don't, so the invoice ledger collapses to PART DESCRIPTION QTY.
+  const shipping = items.some((i) => i.shipping);
   const cols = shipping
     ? `${padText("PART", 26)} ${padText("DESCRIPTION", BRIEF_DESC_WIDTH)} ${padText("DLV/ORD", 9)} STATUS`
     : `${padText("PART", 26)} ${padText("DESCRIPTION", BRIEF_DESC_WIDTH)} QTY`;
   logger.log(dim(cols));
 
   for (const item of items) {
-    const code = padText(cyan(truncateText(item.ProductCode || 'Unknown', 26)), 26);
-    const desc = padText(truncateText(item.Description || '', BRIEF_DESC_WIDTH), BRIEF_DESC_WIDTH);
-    const ordered = parseInt(item.Quantity, 10);
-    const orderedStr = isNaN(ordered) ? String(item.Quantity || 0) : String(ordered);
+    const code = padText(cyan(truncateText(item.code || 'Unknown', 26)), 26);
+    const desc = padText(truncateText(item.desc || '', BRIEF_DESC_WIDTH), BRIEF_DESC_WIDTH);
+    const ordered = parseInt(item.qty, 10);
+    const orderedStr = isNaN(ordered) ? String(item.qty || 0) : String(ordered);
 
     if (!shipping) {
       logger.log(`${code} ${desc} ${green(bold(orderedStr))}`);
       continue;
     }
 
-    const remaining = parseInt(item.RemainingQuantity, 10);
+    const remaining = parseInt(item.remainingQty, 10);
     const delivered = isNaN(remaining) || isNaN(ordered) ? null : Math.max(0, ordered - remaining);
     const qtyColor = deliveryColor(ordered, delivered);
     const qtyStr = padText(qtyColor(bold(`${delivered === null ? '?' : delivered}/${orderedStr}`)), 9);
-    const status = item.Status || '';
+    const status = item.status || '';
     const statusColor = getStatusColor(status);
     logger.log(`${code} ${desc} ${qtyStr} ${statusColor(`${statusGlyph(statusColor)} ${status}`)}`);
   }
@@ -397,7 +473,7 @@ function truncateText(text, width) {
   return s.length > width ? s.slice(0, width - 1) + '…' : s;
 }
 
-// Same traffic-light scheme as the Remaining line in printOrderDetails:
+// Same traffic-light scheme as the Remaining line in the record view:
 // green fully delivered, yellow partial, red nothing delivered yet.
 function deliveryColor(ordered, delivered) {
   if (delivered === null || !(ordered > 0)) return (s) => s;
@@ -407,25 +483,27 @@ function deliveryColor(ordered, delivered) {
 }
 
 export function printCart(cartData, logger) {
-  if (!cartData || !cartData.Lines || cartData.Lines.length === 0) {
+  const lines = cartData?.lineItems || [];
+  if (lines.length === 0) {
     logger.log(yellow(`Cart is empty.`));
     return;
   }
-  
+
   logger.log(`\n${bold(cyan("====================== SHOPPING CART ======================"))} `);
   let index = 1;
-  for (const item of cartData.Lines) {
-    logger.log(` ${bold(blue(index++ + "."))} ${padText(bold("Part:"), 10)} ${cyan(item.SKUID)}`);
-    logger.log(`    ${padText(bold("Desc:"), 10)} ${item.DisplayName}`);
-    logger.log(`    ${padText(bold("Qty:"), 10)} ${green(bold(item.Quantity))} ${dim(`(@ ${item.LinePrice} ea)`)}`);
-    logger.log(`    ${padText(bold("Total:"), 10)} ${green(item.LineTotal)}`);
+  for (const item of lines) {
+    logger.log(` ${bold(blue(index++ + "."))} ${padText(bold("Part:"), 10)} ${cyan(item.productID)}`);
+    logger.log(`    ${padText(bold("Desc:"), 10)} ${item.displayName || item.name || 'N/A'}`);
+    logger.log(`    ${padText(bold("Qty:"), 10)} ${green(bold(String(item.quantity)))} ${dim(`(@ ${fmtMoney(item.unitPrice) || 'N/A'} ea)`)}`);
+    logger.log(`    ${padText(bold("Total:"), 10)} ${green(fmtMoney(item.lineTotal) || 'N/A')}`);
     logger.log(dim(`-----------------------------------------------------------`));
   }
-  
+
+  const cart = cartData?.cart || {};
   logger.log(`\n${bold(cyan("CART TOTALS"))}`);
-  logger.log(`    ${padText(bold("Subtotal:"), 12)} ${green(cartData.Subtotal || "$0.00")}`);
-  logger.log(`    ${padText(bold("Tax:"), 12)} ${green(cartData.TaxTotal || "$0.00")}`);
-  logger.log(`    ${padText(bold("Total:"), 12)} ${green(bold(cartData.Total || "$0.00"))}`);
+  logger.log(`    ${padText(bold("Subtotal:"), 12)} ${green(fmtMoney(cart.subtotal) || "$0.00")}`);
+  logger.log(`    ${padText(bold("Tax:"), 12)} ${green(fmtMoney(cart.taxCost) || "$0.00")}`);
+  logger.log(`    ${padText(bold("Total:"), 12)} ${green(bold(fmtMoney(cart.total) || "$0.00"))}`);
   logger.log(dim(`===========================================================`));
 }
 
@@ -436,7 +514,7 @@ export function printCart(cartData, logger) {
 // every line-item row - a flat table, no merged headers. Plain text only: no
 // colour, glyphs, or truncation; money and quantities are bare numbers so the
 // sheet treats them as numeric; tabs and newlines inside a field are squashed
-// to a space so a row can never split. A cell is blank where the portal has
+// to a space so a row can never split. A cell is blank where the backend has
 // no such value.
 // ---------------------------------------------------------------------------
 export const ORDER_ITEM_TSV_COLUMNS = ["ORDER", "PO", "ORDER STATUS", "DATE", "LINE", "PART", "DESCRIPTION", "DELIVERED", "ORDERED", "LINE STATUS", "UNIT PRICE", "TOTAL"];
@@ -449,9 +527,7 @@ function tsvCell(value) {
   return String(value ?? '').replace(/[\t\r\n]+/g, ' ').trim();
 }
 
-// Money as a bare number for the sheet. The portal is scraped, so this takes
-// the display strings it gives ("$1,234.56") as well as numbers; "" when
-// there is no value.
+// Money as a bare number for the sheet; "" when there is no value.
 function tsvMoney(value) {
   if (value === null || value === undefined || value === '') return '';
   const n = typeof value === 'number' ? value : parseFloat(String(value).replace(/[^0-9.-]+/g, ''));
@@ -463,77 +539,53 @@ function tsvInt(value) {
   return isNaN(n) ? '' : n;
 }
 
-// The scraped order/invoice header is a label -> value map whose labels vary
-// between pages and are not capitalised consistently: the order page says
-// "Order Created on" and "Customer Reference no", the invoice page
-// "Invoice date" (lower-case d) and the same "Customer Reference no". The
-// first present key wins; the lists are shared by the ledger summary line and
-// the --tsv exports so both agree on what they pull out.
-const HEADER_PO_KEYS = ["Purchase order number", "Purchase Number", "PO Number", "PO"];
-const HEADER_REF_KEYS = ["Customer Reference no", "Customer Reference", "Reference", "Job Reference"];
-const HEADER_DATE_KEYS = ["Order Created on", "Order Date", "Invoice date", "Invoice Date", "Date"];
-const HEADER_STATUS_KEYS = ["Status", "Order Status"];
-
-function headerField(header, keys) {
-  for (const k of keys) if (header?.[k]) return header[k];
-  return '';
-}
-
 export function printTsv(columns, rows, logger) {
   logger.tsv(columns.join('\t'));
   for (const row of rows) logger.tsv(row.map(tsvCell).join('\t'));
 }
 
-// `order --tsv`: one row per line item. NHP lines carry no line number, so
-// LINE is the 1-based position on the page.
+// `order --tsv`: one row per line item, LINE from the backend's own lineNo.
 export function orderItemTsvRows(data, orderId) {
-  const { header, items } = data || {};
-  const po = headerField(header, HEADER_PO_KEYS);
-  const status = headerField(header, HEADER_STATUS_KEYS);
-  const date = formatDate(headerField(header, HEADER_DATE_KEYS));
-  return (items || []).map((item, i) => {
-    const ordered = tsvInt(item.Quantity);
-    const remaining = tsvInt(item.RemainingQuantity);
+  const view = orderDetailView(data);
+  return (data?.lineItems || []).map((l, i) => {
+    const ordered = tsvInt(l.qty);
+    const remaining = tsvInt(l.remainingQty);
     const delivered = ordered === '' || remaining === '' ? '' : Math.max(0, ordered - remaining);
-    return [orderId || '', po, status, date, i + 1, item.ProductCode || '', item.Description || '', delivered, ordered, item.Status || '', tsvMoney(item.UnitPrice), tsvMoney(item.Total)];
+    const status = l.eta || l.lineStatus || (l.isBackOrder ? 'Back Order' : '');
+    return [orderId || view.id || '', view.po, view.status, formatDate(view.date), l.lineNo ?? i + 1, l.itemId || '', l.itemName || '', delivered, ordered, status, tsvMoney(l.netPrice ?? l.unitPrice), tsvMoney(l.lineAmount)];
   });
 }
 
 // `orders --tsv` (and the multi-hit outcome of `po`).
 export function orderListTsvRows(orders) {
-  return (orders || []).map((o) => [o.OrderId || o.OrderID || '', o.PurchaseNumber || '', o.OrderStatus || o.Status || '', formatDate(o.OrderDate), tsvMoney(o.TotalText || o.Total)]);
+  return (orders || []).map((o) => [o.orderNo || '', o.poNumber || '', humanStatus(o.status || ''), formatDate(o.orderDate), tsvMoney(o.total)]);
 }
 
 // `invoice --tsv`: one row per invoice line.
 export function invoiceItemTsvRows(data, invoiceId) {
-  const { header, items } = data || {};
-  const po = headerField(header, HEADER_PO_KEYS);
-  const ref = headerField(header, HEADER_REF_KEYS);
-  const date = formatDate(headerField(header, HEADER_DATE_KEYS));
-  return (items || []).map((item, i) => [invoiceId || '', po, ref, date, i + 1, item.ProductCode || '', item.Description || '', tsvInt(item.Quantity), tsvMoney(item.UnitPrice), tsvMoney(item.Total)]);
+  const view = invoiceDetailView(data);
+  return (data?.lineItems || []).map((l, i) => [invoiceId || view.id || '', view.po, view.ref, formatDate(view.date), l.lineNo ?? i + 1, l.itemId || '', l.itemName || '', tsvInt(l.quantity), tsvMoney(l.netPrice ?? l.unitPrice), tsvMoney(l.lineAmount)]);
 }
 
-// `invoices --tsv`.
+// `invoices --tsv`. STATUS stays blank: the backend's invoice status is an
+// opaque code the portal never displays (the column itself is shared across
+// the supplier tools, so it keeps its place).
 export function invoiceListTsvRows(invoices) {
-  return (invoices || []).map((inv) => [inv.DocumentNumber || '', inv.PurchaseNumber || '', inv.CustomerReference || '', inv.OrderStatus || inv.Status || '', formatDate(inv.InvoiceDate), tsvMoney(inv.TotalText), tsvMoney(inv.OutstandingText)]);
+  return (invoices || []).map((inv) => [inv.invoiceId || '', inv.customerRequisition || '', inv.customerReference || '', '', formatDate(inv.invoiceDate), tsvMoney(inv.total), tsvMoney(inv.outstanding)]);
 }
 
-// `price --tsv` / `csv --tsv`: one row per returned part. An unknown part keeps
-// PART and QTY and puts the reason in ERROR. STOCK is the NZ on-hand quantity
-// and STOCK STATUS the same in/out test as the badge; the portal has no list
-// price, so LIST is blank and the currency is always NZD.
-export function priceTsvRows(results, originalRequests = [], config = {}) {
-  return (results || []).map((prod) => {
-    const orig = originalRequests.find((p) => p.itemId.toLowerCase() === (prod.ProductId || '').toLowerCase());
-    const qty = orig ? orig.qty : 1;
-    if (prod.HasError || prod.ProductExist === false) {
-      const reason = prod.ErrorMessages?.length ? prod.ErrorMessages.join("; ") : "Item not recognised.";
-      return [prod.ProductId || '', '', qty, '', '', '', '', '', '', reason];
+// `price --tsv` / `csv --tsv`: one row per requested part. An unknown part
+// keeps PART and QTY and puts the backend's reason in ERROR. STOCK is the NZ
+// on-hand quantity; LIST comes from the price break's undiscounted price.
+export function priceTsvRows(results, config = {}) {
+  return (results || []).map((entry) => {
+    if (entry.error) {
+      return [entry.itemId || '', '', entry.qty, '', '', '', '', '', '', entry.error];
     }
-    const buy = tsvMoney(prod.AdjustedPriceWithCurrency ?? prod.NetPrice);
+    const view = priceView(entry);
+    const buy = tsvMoney(view.buy);
     const margin = config.sellMarginMultiplier;
     const sell = margin !== null && margin !== undefined && buy !== '' ? tsvMoney(buy * margin) : '';
-    const nzStock = tsvInt(prod.OnHandQty);
-    return [prod.ProductId || '', prod.Description || prod.DisplayName || '', qty, buy, sell, '', 'NZD', nzStock, nzStock > 0 ? 'IN STOCK' : 'OUT OF STOCK', ''];
+    return [entry.itemId || '', view.desc || '', entry.qty, buy, sell, tsvMoney(view.list), 'NZD', view.nzQty, view.nzQty > 0 ? 'IN STOCK' : 'OUT OF STOCK', ''];
   });
 }

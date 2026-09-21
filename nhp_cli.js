@@ -16,10 +16,12 @@ import { isInteractive, promptCredentials } from "./prompt.js";
 import {
   INVOICE_ITEM_TSV_COLUMNS,
   INVOICE_LIST_TSV_COLUMNS,
+  invoiceDetailView,
   invoiceItemTsvRows,
   invoiceListTsvRows,
   ORDER_ITEM_TSV_COLUMNS,
   ORDER_LIST_TSV_COLUMNS,
+  orderDetailView,
   orderItemTsvRows,
   orderListTsvRows,
   PRICE_TSV_COLUMNS,
@@ -39,24 +41,31 @@ import { parseArgs } from "jsr:@std/cli@^1/parse-args";
 import { Logger } from "./logger.js";
 import denoConfig from "./deno.json" with { type: "json" };
 
+// Cart responses carry a `messages` list ({ message, messageType }); surface
+// warnings/errors from it and report whether any were errors.
 function reportApiMessages(results, logger) {
-  for (const w of results?.Warnings || []) logger.warn(`[Warning] ${w}`);
-  for (const e of results?.Errors || []) logger.error(`[Error] ${e}`);
-  return results?.Success !== false && !(results?.Errors?.length > 0);
+  let ok = true;
+  for (const m of results?.messages || []) {
+    if (m.messageType === "error") {
+      logger.error(`[Error] ${m.message}`);
+      ok = false;
+    } else if (m.messageType && m.messageType !== "success") {
+      logger.warn(`[Warning] ${m.message}`);
+    }
+  }
+  return ok;
 }
 
-async function findMissingCartParts(client, partNumbers) {
-  const cart = await client.getCart();
-  const lines = cart?.Lines || [];
-  return partNumbers.filter((pn) => !lines.some((l) => l.SKUID?.toLowerCase() === pn.toLowerCase()));
+function cartHasPart(cart, partNumber) {
+  return (cart?.lineItems || []).some((l) => l.productID?.toLowerCase() === partNumber.toLowerCase());
 }
 
 // Finds a cart line by part number, internal line ID, or 1-based line number.
 // Part numbers can be all-numeric (e.g. 06850863), so exact part number
 // matches take priority over line-number interpretation.
 function findCartLine(cart, target) {
-  const lines = cart?.Lines || [];
-  let line = lines.find((l) => l.SKUID?.toLowerCase() === target.toLowerCase() || l.ExternalCartLineId === target);
+  const lines = cart?.lineItems || [];
+  let line = lines.find((l) => l.productID?.toLowerCase() === target.toLowerCase() || l.id === target);
   if (!line && /^\d+$/.test(target)) {
     const index = parseInt(target, 10) - 1;
     if (index >= 0 && index < lines.length) line = lines[index];
@@ -120,11 +129,11 @@ function describeItems(items) {
 
 // price/csv output: the ledger is the default, --full restores the record
 // view, --tsv exports; --json has already printed and wants nothing else.
-function printPriceResults(products, productItems, options, config, logger) {
-  if (options.tsv) printTsv(PRICE_TSV_COLUMNS, priceTsvRows(products, productItems, config), logger);
+function printPriceResults(products, options, config, logger) {
+  if (options.tsv) printTsv(PRICE_TSV_COLUMNS, priceTsvRows(products, config), logger);
   else if (logger.isJson) return;
-  else if (options.full) printPricing(products, productItems, config, logger);
-  else printPriceLedger(products, productItems, config, logger);
+  else if (options.full) printPricing(products, config, logger);
+  else printPriceLedger(products, config, logger);
 }
 
 // Credentials for the client, resolved only when a login is actually needed:
@@ -233,7 +242,7 @@ async function handlePrice(client, args, options, config, logger) {
   const results = await client.getPriceAndStock(productItems);
 
   logger.json(results);
-  printPriceResults(results?.ChildProducts || [], productItems, options, config, logger);
+  printPriceResults(results?.products || [], options, config, logger);
 }
 
 async function handleCsv(client, csvFile, options, config, logger) {
@@ -249,55 +258,46 @@ async function handleCsv(client, csvFile, options, config, logger) {
     Deno.exit(1);
   }
   logger.log(`Parsed ${products.length} products from CSV.`);
+  logger.log(`Fetching pricing for ${products.length} items...`);
 
-  const allResults = [];
-  const batchSize = 20;
+  // The client chunks id lists to the portal's 20-per-request cap itself; an
+  // unknown part comes back as an entry with `error` set, not a throw.
+  const results = await client.getPriceAndStock(products);
 
-  for (let i = 0; i < products.length; i += batchSize) {
-    const batch = products.slice(i, i + batchSize);
-    logger.log(`Fetching pricing for batch ${Math.floor(i / batchSize) + 1} (${batch.length} items)...`);
-    try {
-      const results = await client.getPriceAndStock(batch);
-      if (results?.ChildProducts) {
-        allResults.push(...results.ChildProducts);
-      }
-    } catch (err) {
-      logger.error(`[Error] Failed to fetch pricing for batch starting at index ${i}:`, err.message);
-    }
-  }
-
-  logger.json(allResults);
-  printPriceResults(allResults, products, options, config, logger);
+  logger.json(results);
+  printPriceResults(results?.products || [], options, config, logger);
 }
 
-async function handleOrders(client, offsetStr, options, logger) {
-  const offset = parseInt(offsetStr || "0", 10) || 0;
+async function handleOrders(client, pageStr, options, logger) {
+  const page = parseInt(pageStr || "1", 10) || 1;
 
-  logger.log(`Fetching orders (offset: ${offset}, pageSize: 20)...`);
-  const results = await client.getOrders(20, offset, options);
+  logger.log(`Fetching orders (page ${page}, 20 per page)...`);
+  const results = await client.getOrders(20, page, options);
 
   logger.json(results);
 
   if (options.tsv) {
-    printTsv(ORDER_LIST_TSV_COLUMNS, orderListTsvRows(results?.NhpOrders || []), logger);
+    printTsv(ORDER_LIST_TSV_COLUMNS, orderListTsvRows(results?.items || []), logger);
   } else if (!logger.isJson) {
     // The ledger view is the default for order lists; --full restores the record view.
-    printOrders(results?.NhpOrders || [], logger, !options.full);
+    printOrders(results?.items || [], logger, !options.full);
+    if (results?.meta?.totalPages > 1) logger.log(`Page ${results.meta.page} of ${results.meta.totalPages} (${results.meta.totalCount} orders). 'nhp orders ${page + 1}' for the next page.`);
   }
 }
 
-async function handleInvoices(client, offsetStr, options, logger) {
-  const offset = parseInt(offsetStr || "0", 10) || 0;
+async function handleInvoices(client, pageStr, options, logger) {
+  const page = parseInt(pageStr || "1", 10) || 1;
 
-  logger.log(`Fetching invoices (offset: ${offset}, pageSize: 20)...`);
-  const results = await client.getInvoices(20, offset, options);
+  logger.log(`Fetching invoices (page ${page}, 20 per page)...`);
+  const results = await client.getInvoices(20, page, options);
 
   logger.json(results);
 
   if (options.tsv) {
-    printTsv(INVOICE_LIST_TSV_COLUMNS, invoiceListTsvRows(results?.NhpInvoices || []), logger);
+    printTsv(INVOICE_LIST_TSV_COLUMNS, invoiceListTsvRows(results?.items || []), logger);
   } else if (!logger.isJson) {
-    printInvoices(results?.NhpInvoices || [], logger, options.brief);
+    printInvoices(results?.items || [], logger, options.brief);
+    if (results?.meta?.totalPages > 1) logger.log(`Page ${results.meta.page} of ${results.meta.totalPages} (${results.meta.totalCount} invoices). 'nhp invoices ${page + 1}' for the next page.`);
   }
 }
 
@@ -317,8 +317,6 @@ async function handleOrderDetails(client, orderIds, options, logger) {
     logger.log(`Fetching details for ${what}...`);
   }
 
-  // Fetched one at a time: these are full page loads through a single scraped
-  // session, so parallel requests buy little and risk tripping the portal.
   // A failure is kept per order instead of sinking the rest of the batch.
   const results = [];
   for (const orderId of orderIds) {
@@ -350,11 +348,11 @@ async function handleOrderDetails(client, orderIds, options, logger) {
         logger.error(`Error fetching order ${orderId}:`, error.message);
         failed = true;
       } else if (brief || tsv) {
-        if (!data?.items?.length) {
+        if (!data?.lineItems?.length) {
           logger.error(`No items found for order ${orderId}. The order may not exist.`);
           failed = true;
         } else if (!tsv) {
-          printBriefItems(data, logger, orderId);
+          printBriefItems(orderDetailView(data), logger, orderId);
         }
       } else {
         printOrderDetails(data, orderId, logger);
@@ -383,13 +381,13 @@ async function handleInvoiceDetails(client, invoiceId, options, logger) {
 
   if (!logger.isJson) {
     if (brief || options?.tsv) {
-      if (!data?.items?.length) {
+      if (!data?.lineItems?.length) {
         logger.error(`No items found for invoice ${invoiceId}. The invoice may not exist.`);
         Deno.exit(1);
       } else if (options?.tsv) {
         printTsv(INVOICE_ITEM_TSV_COLUMNS, invoiceItemTsvRows(data, invoiceId), logger);
       } else {
-        printBriefItems(data, logger, invoiceId, "Invoice");
+        printBriefItems(invoiceDetailView(data), logger, invoiceId, "Invoice");
       }
     } else {
       printInvoiceDetails(data, invoiceId, logger);
@@ -406,8 +404,8 @@ async function handlePo(client, args, options, logger) {
 
   logger.log(`Searching for PO matching "${query}"...`);
 
-  const res = await client.getOrders(20, 0, { purchaseNumber: query });
-  const matchedOrders = res?.NhpOrders || [];
+  const res = await client.getOrders(20, 1, { purchaseNumber: query });
+  const matchedOrders = res?.items || [];
 
   logger.json(matchedOrders);
 
@@ -417,13 +415,13 @@ async function handlePo(client, args, options, logger) {
       if (options?.tsv) printTsv(ORDER_LIST_TSV_COLUMNS, [], logger);
       else logger.log(`No orders found matching PO "${query}".`);
     } else if (matchedOrders.length === 1) {
-      const orderId = matchedOrders[0].OrderId || matchedOrders[0].OrderID;
+      const orderId = matchedOrders[0].orderNo;
       logger.log(`Found exactly 1 match (Order: ${orderId}). Fetching details...`);
       const data = await client.getOrderDetails(orderId);
       // Same defaults as `order <id>`: ledger unless --full; --tsv exports.
       if (options?.tsv) printTsv(ORDER_ITEM_TSV_COLUMNS, orderItemTsvRows(data, orderId), logger);
       else if (options?.full) printOrderDetails(data, orderId, logger);
-      else printBriefItems(data, logger, orderId);
+      else printBriefItems(orderDetailView(data), logger, orderId);
     } else if (options?.tsv) {
       printTsv(ORDER_LIST_TSV_COLUMNS, orderListTsvRows(matchedOrders), logger);
     } else {
@@ -456,8 +454,8 @@ async function handleCart(client, args, logger) {
         const results = await client.addToCart(item.partNumber, item.qty);
         logger.json(results);
         const ok = reportApiMessages(results, logger);
-        const missing = ok ? await findMissingCartParts(client, [item.partNumber]) : [item.partNumber];
-        if (missing.length === 0) {
+        // The add responds with the whole cart; verify the part landed in it.
+        if (ok && cartHasPart(results, item.partNumber)) {
           logger.log(`Successfully added ${item.partNumber} to cart.`);
         } else {
           logger.error(`[Failed] ${item.partNumber} was not added to the cart.`);
@@ -465,19 +463,15 @@ async function handleCart(client, args, logger) {
         }
       } else {
         logger.log(`Adding ${items.length} items to cart in bulk...`);
-        let csvContent = "Part Number,Quantity\r\n";
-        for (const item of items) {
-          csvContent += `${item.partNumber},${item.qty}\r\n`;
-        }
-        const results = await client.uploadCartCsvContent(csvContent, "bulk_add.csv");
+        const results = await client.addToCartBatch(items.map((i) => ({ itemId: i.partNumber, qty: i.qty })));
         logger.json(results);
-        reportApiMessages(results, logger);
-        const added = results.requested.length - results.missing.length;
-        if (results.missing.length === 0) {
+        const failed = results.errors || [];
+        const added = items.length - failed.length;
+        if (failed.length === 0) {
           logger.log(`Successfully added ${added} items to cart.`);
         } else {
-          if (added > 0) logger.log(`Added ${added} of ${results.requested.length} items to cart.`);
-          for (const pn of results.missing) logger.error(`[Failed] '${pn}' was not added to the cart.`);
+          if (added > 0) logger.log(`Added ${added} of ${items.length} items to cart.`);
+          for (const e of failed) logger.error(`[Failed] '${e.productID}' was not added: ${e.message}`);
           Deno.exit(1);
         }
       }
@@ -507,13 +501,13 @@ async function handleCart(client, args, logger) {
         Deno.exit(1);
       }
 
-      const results = await client.removeCartLine(line.ExternalCartLineId);
+      const results = await client.removeCartLine(line.id);
       logger.json(results);
-      const ok = reportApiMessages(results, logger);
+      const ok = reportApiMessages(results, logger) && !cartHasPart(results, line.productID);
       if (ok) {
-        logger.log(`Successfully removed ${line.SKUID} from cart.`);
+        logger.log(`Successfully removed ${line.productID} from cart.`);
       } else {
-        logger.error(`[Failed] Could not remove ${line.SKUID} from cart.`);
+        logger.error(`[Failed] Could not remove ${line.productID} from cart.`);
         Deno.exit(1);
       }
       break;
@@ -539,13 +533,13 @@ async function handleCart(client, args, logger) {
         Deno.exit(1);
       }
 
-      const results = await client.updateCartLineQuantity(line.ExternalCartLineId, quantity);
+      const results = await client.updateCartLineQuantity(line, quantity);
       logger.json(results);
       const ok = reportApiMessages(results, logger);
       if (ok) {
-        logger.log(`Successfully updated ${line.SKUID} to quantity ${quantity}.`);
+        logger.log(`Successfully updated ${line.productID} to quantity ${quantity}.`);
       } else {
-        logger.error(`[Failed] Could not update ${line.SKUID}.`);
+        logger.error(`[Failed] Could not update ${line.productID}.`);
         Deno.exit(1);
       }
       break;
@@ -554,13 +548,7 @@ async function handleCart(client, args, logger) {
       logger.log(`Clearing all items from cart...`);
       const results = await client.clearCart();
       logger.json(results);
-      const ok = reportApiMessages(results, logger);
-      if (ok) {
-        logger.log(`Successfully cleared the cart.`);
-      } else {
-        logger.error(`[Failed] Could not clear the cart.`);
-        Deno.exit(1);
-      }
+      logger.log(results.cleared === 0 ? `Cart was already empty.` : `Successfully cleared the cart (${results.cleared} line${results.cleared === 1 ? "" : "s"}).`);
       break;
     }
     case "upload": {
@@ -572,7 +560,7 @@ async function handleCart(client, args, logger) {
       logger.log(`Uploading cart CSV '${csvFilePath}'...`);
       const results = await client.uploadCartCsv(csvFilePath);
       logger.json(results);
-      reportApiMessages(results, logger);
+      for (const w of results.Warnings || []) logger.warn(`[Warning] ${w}`);
       const added = results.requested.length - results.missing.length;
       if (results.missing.length === 0) {
         logger.log(`Successfully uploaded CSV to cart (${added} items).`);
@@ -605,14 +593,15 @@ Products & Pricing:
                               (columns: partNumber[,qty] - qty defaults to 1)
 
 Orders & Invoices:
-  orders [offset] [--full|--tsv]
+  orders [page] [--full|--tsv]
                               Order history (20 per page, ledger by default)
-  invoices [offset] [--brief|--tsv]
+  invoices [page] [--brief|--tsv]
                               Invoice history (20 per page)
   order <orderId...> [--full|--tsv]
-                              Line items and shipping status for one or more orders (ledger by default)
+                              Line items and shipping status for one or more
+                              orders, e.g. SOR1314816 (ledger by default)
   invoice <id> [--brief|--tsv]
-                              Line items for an invoice
+                              Line items for an invoice, e.g. SIN02755715
   po <query> [--full|--tsv]   Search order history by PO number
 
 Cart:
@@ -641,9 +630,11 @@ Options:
   --tsv                       Tab-separated table for price/csv/orders/order/
                               invoices/invoice/po (pipe to Set-Clipboard / clip
                               and paste into a spreadsheet)
-  --dateFrom, --dateTo, --purchaseNumber, --documentNumber,
-  --orderNumber, --customerReference
-                              Search filters for orders/invoices
+  --dateFrom, --dateTo        Date range filters for orders/invoices (yyyy-mm-dd)
+  --purchaseNumber, --documentNumber, --orderNumber, --customerReference
+                              Search filters for orders/invoices. The portal
+                              has one search box, so these all feed the same
+                              free-text match.
   -h, --help                  Show this help
   --version                   Show version
 

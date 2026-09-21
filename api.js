@@ -1,8 +1,16 @@
-import { DOMParser } from "https://deno.land/x/deno_dom@v0.1.56/deno-dom-wasm.ts";
 import { CookieJar } from "./cookie-jar.js";
 import { parseCsvText } from "./config.js";
 import { configPath, ensureConfigDir, fileExists, legacyPath, resolveCredentials, SESSION_FILE } from "./store.js";
 import { Logger } from "./logger.js";
+
+// The portal (rebuilt 09/2026) is a Next.js frontend over a same-origin REST
+// API at /api/v1/. Everything authenticates with the __Host-sid session
+// cookie; there are no anti-forgery tokens. See Docs/portal-api.md.
+const BASE = "https://www.nhpnz.co.nz";
+// Public MSAL client id, from the site's own bundles. Login is Microsoft
+// Entra native auth proxied through the portal's /api/v1/auth endpoint.
+const CLIENT_ID = "bf3a79f2-3e70-4b13-9945-481ba2f6c678";
+const SESSION_COOKIE = "__Host-sid";
 
 export class NHPAPIError extends Error {
   constructor(message, statusCode, responseBody) {
@@ -13,22 +21,20 @@ export class NHPAPIError extends Error {
   }
 }
 
-function extractToken(html) {
-  const document = new DOMParser().parseFromString(html, "text/html");
-  if (!document) {
-    throw new NHPAPIError("Failed to parse HTML document while extracting token.", 500, html);
-  }
+// The portal caps id lists at 20 per request in its own UI code.
+const BATCH_SIZE = 20;
 
-  const crsfForm = document.querySelector('[id="_CRSFform" i]') || document.getElementById("_CRSFform");
-  if (crsfForm) {
-    const input = crsfForm.querySelector('input');
-    if (input && input.getAttribute('value')) return input.getAttribute('value');
-  }
+// The order-detail endpoint takes the bare sales order number ("SOR1314816");
+// the order list's composite id ("NZ-20198-SOR1314816") is rejected with a
+// 404, so a composite id is reduced to its final segment here.
+export function normalizeOrderId(orderId) {
+  return String(orderId).toUpperCase().replace(/^[A-Z]+-\d+-/, "");
+}
 
-  const globalInput = document.querySelector('input[name="__RequestVerificationToken" i]');
-  if (globalInput && globalInput.getAttribute('value')) return globalInput.getAttribute('value');
-
-  throw new NHPAPIError("Could not find __RequestVerificationToken in HTML", 500, html);
+function chunk(list, size) {
+  const out = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
 }
 
 export class NHPClient {
@@ -44,13 +50,10 @@ export class NHPClient {
     this.onLogin = config.onLogin || null;
     this.loggedInAt = null;
     this.userAgent = config.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-    // NHP's portal is extremely slow; order/invoice listings alone can take
-    // over a minute, so the default timeout is deliberately generous.
-    this.timeoutMs = config.timeoutMs || 120000;
+    this.timeoutMs = config.timeoutMs || 30000;
     this.logger = config.logger || new Logger({ isJson: config.silent, verbose: false });
     this._isSessionVerified = false;
     this._authPromise = null;
-    this._cachedToken = null;
   }
 
   async init() {
@@ -95,60 +98,57 @@ export class NHPClient {
     return response;
   }
 
-  // A request that lands on the login or access-denied page means the session
-  // is stale; throw a 401 so _withAuthRetry re-authenticates and retries.
-  _assertAuthenticated(response) {
-    const url = (response.url || "").toLowerCase();
-    if (url.includes("/login") || url.includes("/access-denied")) {
-      throw new NHPAPIError("Redirected to the login/access-denied page. Session is not authenticated.", 401, "");
-    }
-  }
-
-  // POST an api/cxa form endpoint with the anti-forgery token and parse the
-  // JSON response.
-  async _postForm(label, url, params, referer) {
-    const formToken = await this._getAntiForgeryToken();
-    params.append("__RequestVerificationToken", formToken);
-
-    const response = await this._fetch(url, {
-      method: "POST",
-      headers: {
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "__RequestVerificationToken": formToken,
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": referer,
-      },
-      body: params.toString(),
-    });
-
-    this._assertAuthenticated(response);
-    const responseText = await response.text();
-    if (!response.ok) {
-      throw new NHPAPIError(`${label} API returned status ${response.status}`, response.status, responseText);
-    }
-
-    try {
-      return JSON.parse(responseText);
-    } catch {
-      if (responseText.includes("Server Error") || responseText.includes("Runtime Error")) {
-        throw new NHPAPIError("The NHP server returned a '500 Server Error' page. This typically indicates a backend system crash.", 500, responseText);
+  // A JSON request against /api/v1/. `json` and `form` are exclusive bodies;
+  // `query` is appended to the path. Throws NHPAPIError with the backend's
+  // own reason where it gives one ({ error } / { message } / RFC 9457 title).
+  async _api(label, method, path, { json, form, query, headers } = {}) {
+    let url = BASE + path;
+    if (query) {
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(query)) {
+        if (v !== undefined && v !== null && v !== "") params.append(k, String(v));
       }
+      const qs = params.toString();
+      if (qs) url += (path.includes("?") ? "&" : "?") + qs;
+    }
+
+    const init = {
+      method,
+      headers: { "Accept": "application/json, text/plain, */*", "Referer": BASE + "/", ...headers },
+    };
+    if (json !== undefined) {
+      init.headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(json);
+    } else if (form !== undefined) {
+      init.headers["Content-Type"] = "application/x-www-form-urlencoded";
+      init.body = new URLSearchParams(form).toString();
+    }
+
+    const response = await this._fetch(url, init);
+    const responseText = await response.text();
+    let data = null;
+    try {
+      data = JSON.parse(responseText);
+    } catch {
+      // Some endpoints 404 with an HTML error page; data stays null.
+    }
+
+    if (!response.ok) {
+      const reason = data?.error_description?.split(/\r?\n/)[0] || data?.error || data?.message || data?.title ||
+        `${label} API returned status ${response.status}`;
+      throw new NHPAPIError(typeof reason === "string" ? reason : `${label} API returned status ${response.status}`, response.status, responseText);
+    }
+    if (data === null && responseText.trim() !== "") {
       throw new NHPAPIError(`[${label} API] Failed to parse response JSON. Response starts with: ${responseText.substring(0, 100)}`, response.status, responseText);
     }
+    return data;
   }
 
   async verifySession() {
-    if (!this.jar.has(".AspNet.Cookies") && !this.jar.has("Nhp.AuthToken")) {
-      return false;
-    }
+    if (!this.jar.has(SESSION_COOKIE)) return false;
     try {
-      const response = await this._fetch("https://www.nhpnz.co.nz/accountmanagement");
-      await response.text();
-      if (response.url.toLowerCase().includes("/login")) {
-        return false;
-      }
-      return response.ok;
+      const session = await this._api("Session", "GET", "/api/v1/session");
+      return session?.isAuthenticated === true;
     } catch {
       return false;
     }
@@ -164,14 +164,14 @@ export class NHPClient {
       await this.init();
       if (!force) {
         if (this._isSessionVerified) return;
-        // Reuse saved cookies optimistically; if they turn out to be stale,
-        // _withAuthRetry re-authenticates and retries the request.
-        if (this.jar.has(".AspNet.Cookies") || this.jar.has("Nhp.AuthToken")) {
-          this.logger.debug(`[Auth] Reusing saved session cookies.`);
+        // Reuse a saved session cookie optimistically; if it turns out to be
+        // stale, _withAuthRetry re-authenticates and retries the request.
+        if (this.jar.has(SESSION_COOKIE)) {
+          this.logger.debug(`[Auth] Reusing saved session cookie.`);
           this._isSessionVerified = true;
           return;
         }
-        this.logger.debug(`[Auth] No saved session cookies. Performing login...`);
+        this.logger.debug(`[Auth] No saved session cookie. Performing login...`);
       } else {
         this.logger.debug(`[Auth] Force login requested. Logging in...`);
       }
@@ -187,79 +187,72 @@ export class NHPClient {
     }
   }
 
+  // One step of the Entra native-auth flow (initiate/challenge/token),
+  // proxied through the portal. Errors carry Entra's error_description.
+  _authStep(step, form) {
+    return this._api(`Login (${step})`, "POST", `/api/v1/auth/oauth2/v2.0/${step}`, { form });
+  }
+
+  // Login: Microsoft Entra External ID native auth, proxied by the portal.
+  //   1. POST /api/v1/session/preflight   account state ({ requiresReset })
+  //   2. POST .../oauth2/v2.0/initiate    username -> continuation_token
+  //   3. POST .../oauth2/v2.0/challenge   expect challenge_type "password"
+  //   4. POST .../oauth2/v2.0/token       password -> tokens; the proxy sets
+  //      the __Host-sid session cookie (48h) on this response, and that
+  //      cookie alone authenticates every data endpoint afterwards.
   async performLogin() {
-    this._cachedToken = null;
     this.jar.clear();
     const creds = typeof this.credentials === "function"
       ? await this.credentials()
       : (this.credentials || await resolveCredentials());
     if (!creds) throw new NHPAPIError("No credentials. Run 'nhp login', or set NHP_USERNAME and NHP_PASSWORD.", 401, "");
 
-    this.logger.debug(`[1/2] Fetching login page to get cookies and CRSF token...`);
-    const getResp = await this._fetch("https://www.nhpnz.co.nz/login", {
-      headers: {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-      },
+    this.logger.debug(`[1/4] Preflight check for ${creds.username}...`);
+    const preflight = await this._api("Login (preflight)", "POST", "/api/v1/session/preflight", { json: { identifier: creds.username } });
+    if (preflight?.requiresReset) {
+      throw new NHPAPIError("NHP requires a password reset for this account. Reset it on www.nhpnz.co.nz, then run 'nhp login --reset'.", 401, "");
+    }
+    if (preflight?.accountDisabled) {
+      throw new NHPAPIError("This NHP account is disabled. Contact NHP.", 401, "");
+    }
+
+    this.logger.debug(`[2/4] Initiating sign-in...`);
+    const initiate = await this._authStep("initiate", {
+      client_id: CLIENT_ID,
+      username: creds.username,
+      challenge_type: "password oob redirect",
+    });
+    if (!initiate?.continuation_token) {
+      throw new NHPAPIError("Login initiate returned no continuation token.", 500, JSON.stringify(initiate));
+    }
+
+    this.logger.debug(`[3/4] Requesting password challenge...`);
+    const challenge = await this._authStep("challenge", {
+      client_id: CLIENT_ID,
+      continuation_token: initiate.continuation_token,
+      challenge_type: "password oob redirect",
+    });
+    if (challenge?.challenge_type !== "password") {
+      throw new NHPAPIError(`NHP asked for a '${challenge?.challenge_type}' challenge (e.g. an emailed code), which this tool cannot answer. Log in once at www.nhpnz.co.nz and try again.`, 401, JSON.stringify(challenge));
+    }
+
+    this.logger.debug(`[4/4] Submitting password...`);
+    await this._authStep("token", {
+      client_id: CLIENT_ID,
+      continuation_token: challenge.continuation_token,
+      grant_type: "password",
+      scope: "openid profile offline_access",
+      password: creds.password,
+      client_info: "true",
     });
 
-    const html = await getResp.text();
-    const crsfToken = extractToken(html);
-    this.logger.debug(`- Extracted CRSF Token: ${crsfToken.substring(0, 15)}...`);
-
-    this.logger.debug(`[2/2] Submitting login credentials...`);
-    const bodyParams = new URLSearchParams();
-    bodyParams.append("__RequestVerificationToken", crsfToken);
-    bodyParams.append("UserName", creds.username);
-    bodyParams.append("Password", creds.password);
-    bodyParams.append("RememberMe", "false");
-    bodyParams.append("X-Requested-With", "XMLHttpRequest");
-
-    const postResp = await this._fetch("https://www.nhpnz.co.nz/api/cxa/NhpAccount/Login", {
-      method: "POST",
-      headers: {
-        "Accept": "*/*",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "X-Requested-With": "XMLHttpRequest",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "Referer": "https://www.nhpnz.co.nz/login",
-      },
-      body: bodyParams.toString(),
-    });
-
-    if (!postResp.ok) {
-      throw new NHPAPIError(`Login POST request failed with status: ${postResp.status}`, postResp.status, await postResp.text());
+    if (!this.jar.has(SESSION_COOKIE)) {
+      throw new NHPAPIError("Login succeeded but no session cookie was set.", 500, "");
     }
 
-    const postBody = await postResp.text();
-    let isSuccess = false;
-    try {
-      const json = JSON.parse(postBody);
-      isSuccess = json.Success;
-    } catch {
-      isSuccess = postResp.status === 200;
-    }
-
-    if (isSuccess) {
-      this.loggedInAt = Date.now();
-      this.logger.debug(`[Auth] Login successful. Cookies saved.`);
-      if (this.onLogin) await this.onLogin(creds);
-    } else {
-      throw new NHPAPIError(`Login response indicates failure.`, postResp.status, postBody);
-    }
-  }
-
-  getSearchUserId() {
-    for (const name of this.jar.names()) {
-      if (name.startsWith("sc_") && name.length > 20) {
-        return this.jar.get(name);
-      }
-    }
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-      return crypto.randomUUID();
-    }
-    return "00000000-0000-0000-0000-000000000000";
+    this.loggedInAt = Date.now();
+    this.logger.debug(`[Auth] Login successful. Session cookie saved.`);
+    if (this.onLogin) await this.onLogin(creds);
   }
 
   async _withAuthRetry(fn) {
@@ -267,16 +260,7 @@ export class NHPClient {
     try {
       return await fn();
     } catch (err) {
-      const isAuthError = err instanceof NHPAPIError && (
-        err.statusCode === 401 ||
-        err.statusCode === 403 ||
-        err.statusCode === 419 ||
-        err.statusCode === 420 || // NHP rejects stale sessions/anti-forgery tokens with 420
-        err.message.includes("VerificationToken") ||
-        (err.responseBody && err.responseBody.toLowerCase().includes("/login")) ||
-        (err.responseBody && err.responseBody.includes("error=unauthorized"))
-      );
-
+      const isAuthError = err instanceof NHPAPIError && (err.statusCode === 401 || err.statusCode === 403);
       if (isAuthError) {
         this.logger.debug(`[Auth] API call failed with suspected auth error. Retrying login once...`);
         this._isSessionVerified = false;
@@ -287,340 +271,189 @@ export class NHPClient {
     }
   }
 
-  async _getAntiForgeryToken() {
-    if (this._cachedToken) {
-      return this._cachedToken;
-    }
-
-    const cookieToken = this.jar.get("__RequestVerificationToken");
-    if (!cookieToken) {
-      throw new NHPAPIError("No RequestVerificationToken cookie found.", 401, "");
-    }
-    const tokenResp = await this._fetch("https://www.nhpnz.co.nz/api/antiforgerytoken/get");
-
-    if (!tokenResp.ok) {
-      throw new NHPAPIError(`Failed to fetch anti-forgery token from API.`, tokenResp.status, await tokenResp.text());
-    }
-    const tokenText = await tokenResp.text();
-    let formToken = "";
-    try {
-      const json = JSON.parse(tokenText);
-      formToken = json.__RequestVerificationToken || json.token || json.Token || json.Value || json.value;
-    } catch {
-      formToken = tokenText.replace(/['"]/g, '').trim();
-    }
-    if (!formToken) {
-      throw new NHPAPIError("Failed to parse anti-forgery token from response.", tokenResp.status, tokenText);
-    }
-    this._cachedToken = formToken;
-    return formToken;
-  }
-
+  // Site search (Sitecore Search; same widget request the site itself sends).
   searchProducts(query) {
-    return this._withAuthRetry(async () => {
-      const userId = this.getSearchUserId();
-      const searchQ = JSON.stringify({
-        "widget": {
-          "items": [{
+    return this._withAuthRetry(() =>
+      this._api("Search", "POST", "/api/v1/search", {
+        json: {
+          "widget": {
+            "items": [{
               "rfk_id": "rfkid_6",
               "entity": "product",
-              "search": { "content": {}, "limit": 10, "query": { "keyphrase": query }, "suggestion": [{ "max": 10, "name": "product_name_did_you_mean", "keyphrase_fallback": true }] }
-          }]
+              "search": { "content": {}, "limit": 10, "query": { "keyphrase": query }, "suggestion": [{ "max": 10, "name": "product_name_did_you_mean", "keyphrase_fallback": true }] },
+            }],
+          },
+          "context": { "locale": { "country": "nz", "language": "en" }, "user": { "user_id": crypto.randomUUID() } },
         },
-        "context": { "locale": { "country": "nz", "language": "en" }, "user": { "user_id": userId } }
-      });
-
-      const response = await this._fetch("https://www.nhpnz.co.nz/api/xmc-next/search", {
-        method: "POST",
-        headers: {
-          "Accept": "application/json, text/plain, */*",
-          "Content-Type": "application/json",
-          "x-bypass-data-massage": "true",
-          "Referer": "https://www.nhpnz.co.nz/",
-        },
-        body: searchQ,
-      });
-
-      const responseText = await response.text();
-      if (!response.ok) {
-        throw new NHPAPIError(`Search API returned status ${response.status}`, response.status, responseText);
-      }
-      try {
-        return JSON.parse(responseText);
-      } catch {
-        throw new NHPAPIError(`[Search API] Failed to parse response JSON. Response starts with: ${responseText.substring(0, 100)}`, response.status, responseText);
-      }
-    });
-  }
-
-  getPriceAndStock(products) {
-    return this._withAuthRetry(() => {
-      const params = new URLSearchParams();
-      for (let i = 0; i < products.length; i++) {
-        params.append(`productList[${i}][ItemId]`, products[i].itemId);
-        params.append(`productList[${i}][Qty]`, String(products[i].qty));
-      }
-      params.append("isDefaultToMinimum", "true");
-
-      return this._postForm(
-        "Pricing",
-        "https://www.nhpnz.co.nz/api/cxa/availabilityandprice/getproductavailabilityandprice?sc_site=NZ",
-        params,
-        "https://www.nhpnz.co.nz/account/price-and-availability",
-      );
-    });
-  }
-
-  _historyParams(options) {
-    const params = new URLSearchParams();
-    params.append("documentNumber", options.documentNumber || "");
-    params.append("orderNumber", options.orderNumber || "");
-    params.append("purchaseNumber", options.purchaseNumber || "");
-    params.append("customerReference", options.customerReference || "");
-    params.append("dateFrom", options.dateFrom || "");
-    params.append("dateTo", options.dateTo || "");
-    return params;
-  }
-
-  getOrders(pageSize = 20, offset = 0, options = {}) {
-    return this._withAuthRetry(() =>
-      this._postForm(
-        "Orders",
-        `https://www.nhpnz.co.nz/api/cxa/NhpOrders/GetOrderHistory?&pageSize=${pageSize}&offset=${offset}&sc_site=NZ`,
-        this._historyParams(options),
-        "https://www.nhpnz.co.nz/accountmanagement/myorders",
-      )
+      })
     );
   }
 
-  getInvoices(pageSize = 20, offset = 0, options = {}) {
-    return this._withAuthRetry(() =>
-      this._postForm(
-        "Invoices",
-        `https://www.nhpnz.co.nz/api/cxa/NhpOrders/GetInvoiceHistory?type=invoice&pageSize=${pageSize}&offset=${offset}&sc_site=NZ`,
-        this._historyParams(options),
-        "https://www.nhpnz.co.nz/accountmanagement/invoices",
-      )
-    );
-  }
-
-  parseDetailsHeader(document) {
-    const header = {};
-    const detailItems = document.querySelectorAll('.c-order-details__item');
-    for (const item of detailItems) {
-      const label = item.querySelector('.c-order-details__label')?.textContent.replace(':', '').trim();
-      const value = item.querySelector('.c-order-details__value')?.textContent.trim();
-      if (label) header[label] = value || "";
-    }
-    const addresses = {};
-    const addrItems = document.querySelectorAll('.c-credit-note-address__item');
-    for (const item of addrItems) {
-      const title = item.querySelector('h3')?.textContent.trim();
-      const value = item.querySelector('p')?.textContent.trim();
-      if (title) addresses[title] = value || "";
-    }
-    return { header, addresses };
-  }
-
-  // Fetches and scrapes an order/invoice details page.
-  _getDetails(label, url, includeShipping) {
+  // Product records (pricing lives in priceBreaks). Unknown parts come back
+  // in `errors` with the backend's reason, never as a throw.
+  getProducts(itemIds) {
     return this._withAuthRetry(async () => {
-      const response = await this._fetch(url, {
-        headers: {
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
-      });
-      this._assertAuthenticated(response);
-      const html = await response.text();
-      if (!response.ok) {
-        throw new NHPAPIError(`Failed to fetch ${label} details. Status: ${response.status}`, response.status, html);
+      const merged = { products: [], errors: [] };
+      for (const ids of chunk(itemIds, BATCH_SIZE)) {
+        const result = await this._api("Products", "POST", "/api/v1/commerce/products/batch", { json: { productIds: ids } });
+        merged.products.push(...(result?.products || []));
+        merged.errors.push(...(result?.errors || []));
       }
-
-      const document = new DOMParser().parseFromString(html, "text/html");
-      if (!document) throw new NHPAPIError("Failed to parse HTML document.", response.status, html);
-
-      const { header, addresses } = this.parseDetailsHeader(document);
-      const items = [];
-      const rows = document.querySelectorAll('.c-order-table__row');
-
-      for (const row of rows) {
-        const item = {
-          Description: row.querySelector('h4')?.textContent.trim() || "",
-          ProductCode: row.querySelector('p')?.textContent.trim() || "",
-          UnitPrice: row.querySelector('.c-order-table__price')?.textContent.trim() || "",
-          Quantity: row.querySelector('.c-order-table__qty')?.textContent.trim() || "",
-          Total: row.querySelector('.c-order-table__total')?.textContent.trim() || "",
-        };
-        if (includeShipping) {
-          item.RemainingQuantity = row.querySelector('.c-order-table__remqty')?.textContent.trim() || "";
-          item.UOM = row.querySelector('.c-order-table__uom')?.textContent.trim() || "";
-          item.Status = row.querySelector('.c-order-table__eta')?.textContent.replace(/\s+/g, ' ').trim() || "";
-        }
-        if (item.Description && item.ProductCode) {
-          items.push(item);
-        }
-      }
-      return { header, addresses, items };
+      return merged;
     });
+  }
+
+  // Stock for a list of part numbers.
+  getAvailability(itemIds) {
+    return this._withAuthRetry(async () => {
+      const items = [];
+      for (const ids of chunk(itemIds, BATCH_SIZE)) {
+        const result = await this._api("Availability", "POST", "/api/v1/commerce/products/availability", {
+          json: { products: ids.map((id) => ({ id })), locale: "NZ" },
+        });
+        items.push(...(result?.items || []));
+      }
+      return { items };
+    });
+  }
+
+  // Price and stock for { itemId, qty } items: product records (prices) and
+  // availability (stock) fetched in parallel and stitched per requested item.
+  // A part the portal does not recognise keeps its entry with `error` set, so
+  // rows always line up with the request.
+  async getPriceAndStock(items) {
+    const ids = items.map((p) => String(p.itemId).toUpperCase());
+    const [products, availability] = await Promise.all([this.getProducts(ids), this.getAvailability(ids)]);
+
+    const byId = new Map(products.products.map((p) => [p.id.toUpperCase(), p]));
+    const stockById = new Map((availability.items || []).map((a) => [a.productId.toUpperCase(), a]));
+    const errorById = new Map(products.errors.map((e) => [String(e.productId).toUpperCase(), e.message || `Status ${e.status}`]));
+
+    return {
+      products: items.map((item) => {
+        const id = String(item.itemId).toUpperCase();
+        return {
+          itemId: id,
+          qty: item.qty,
+          product: byId.get(id) ?? null,
+          availability: stockById.get(id) ?? null,
+          error: byId.has(id) ? null : (errorById.get(id) ?? "Item not recognised."),
+        };
+      }),
+    };
+  }
+
+  _history(label, path, sortBy, page, pageSize, options = {}) {
+    return this._withAuthRetry(() =>
+      this._api(label, "GET", path, {
+        query: {
+          page,
+          pageSize,
+          sortBy,
+          // One free-text `search` box matches document/order/PO/reference
+          // numbers; the old per-field filters all funnel into it.
+          search: options.search || options.purchaseNumber || options.documentNumber || options.orderNumber || options.customerReference,
+          from: options.dateFrom,
+          to: options.dateTo,
+        },
+      })
+    );
+  }
+
+  getOrders(pageSize = 20, page = 1, options = {}) {
+    return this._history("Orders", "/api/v1/commerce/orders/all", "!DateCreated", page, pageSize, options);
+  }
+
+  getInvoices(pageSize = 20, page = 1, options = {}) {
+    return this._history("Invoices", "/api/v1/commerce/invoices/all", "!InvoiceDate", page, pageSize, options);
+  }
+
+  getBackorders(pageSize = 20, page = 1, options = {}) {
+    return this._history("Backorders", "/api/v1/commerce/orders/backorders", "OrderNumber", page, pageSize, options);
   }
 
   getOrderDetails(orderId) {
-    return this._getDetails(
-      "order",
-      `https://www.nhpnz.co.nz/accountmanagement/myorders/myorder?id=${encodeURIComponent(orderId)}`,
-      true,
-    );
+    const id = normalizeOrderId(orderId);
+    return this._withAuthRetry(() => this._api("Order", "GET", `/api/v1/commerce/orders/${encodeURIComponent(id)}`));
   }
 
+  // Invoice details take the invoice number ("SIN02755715"); the invoice
+  // list's GUID `id` is not accepted. Returns { header, lineItems }.
   getInvoiceDetails(invoiceId) {
-    return this._getDetails(
-      "invoice",
-      `https://www.nhpnz.co.nz/accountmanagement/invoices/invoice?id=${encodeURIComponent(invoiceId)}`,
-      false,
-    );
-  }
-
-  addToCart(productId, quantity = 1) {
-    return this._withAuthRetry(() => {
-      const params = new URLSearchParams();
-      params.append("addtocart_catalogname", "NHP_NZ_Catalog");
-      params.append("addtocart_productid", productId);
-      params.append("addtocart_variantid", "");
-      params.append("quantity", String(quantity));
-
-      return this._postForm(
-        "Cart Add",
-        "https://www.nhpnz.co.nz/api/cxa/Cart/AddCartLine",
-        params,
-        `https://www.nhpnz.co.nz/product/${encodeURIComponent(productId)}`,
-      );
-    });
+    const id = String(invoiceId).toUpperCase();
+    return this._withAuthRetry(() => this._api("Invoice", "GET", `/api/v1/commerce/invoices/${encodeURIComponent(id)}/line-items`));
   }
 
   getCart() {
+    return this._withAuthRetry(() => this._api("Cart", "GET", "/api/v1/commerce/cart"));
+  }
+
+  addToCart(productId, quantity = 1) {
     return this._withAuthRetry(() =>
-      this._postForm(
-        "Get Cart",
-        "https://www.nhpnz.co.nz/api/cxa/Cart/GetCart?sc_site=NZ",
-        new URLSearchParams(),
-        "https://www.nhpnz.co.nz/shoppingcart",
-      )
+      this._api("Cart Add", "POST", "/api/v1/commerce/cart/lineitems", {
+        json: { productID: String(productId).toUpperCase(), quantity },
+      })
     );
   }
 
-  removeCartLine(lineNumber) {
-    return this._withAuthRetry(() => {
-      const params = new URLSearchParams();
-      params.append("lineNumber", lineNumber);
-      return this._postForm(
-        "Remove Cart Line",
-        "https://www.nhpnz.co.nz/api/cxa/Cart/RemoveShoppingCartLine?sc_site=NZ",
-        params,
-        "https://www.nhpnz.co.nz/shoppingcart",
-      );
+  // Bulk add. The endpoint reports per-item outcomes honestly:
+  // { applied: [{ productID, ... }], errors: [{ productID, message }] }.
+  addToCartBatch(items) {
+    return this._withAuthRetry(async () => {
+      const merged = { applied: [], errors: [] };
+      for (const part of chunk(items, BATCH_SIZE)) {
+        const result = await this._api("Cart Batch Add", "POST", "/api/v1/commerce/cart/lineitems/batch", {
+          json: { items: part.map((i) => ({ productID: String(i.itemId ?? i.productID).toUpperCase(), quantity: i.qty ?? i.quantity ?? 1 })) },
+        });
+        merged.applied.push(...(result?.applied || []));
+        merged.errors.push(...(result?.errors || []));
+      }
+      return merged;
     });
   }
 
-  updateCartLineQuantity(lineNumber, quantity) {
-    return this._withAuthRetry(() => {
-      const params = new URLSearchParams();
-      params.append("quantity", String(quantity));
-      params.append("lineNumber", lineNumber);
-      return this._postForm(
-        "Update Cart Line",
-        "https://www.nhpnz.co.nz/api/cxa/Cart/UpdateCartLineQuantity?sc_site=NZ",
-        params,
-        "https://www.nhpnz.co.nz/shoppingcart",
-      );
-    });
-  }
-
-  clearCart() {
+  // `line` is a line item from getCart(); PATCH wants the product and
+  // inventory record echoed alongside the new quantity.
+  updateCartLineQuantity(line, quantity) {
     return this._withAuthRetry(() =>
-      this._postForm(
-        "Clear Cart",
-        "https://www.nhpnz.co.nz/api/cxa/CustomCart/ClearCart?sc_site=NZ",
-        new URLSearchParams(),
-        "https://www.nhpnz.co.nz/shoppingcart",
-      )
+      this._api("Cart Update", "PATCH", `/api/v1/commerce/cart/lineitems/${encodeURIComponent(line.id)}`, {
+        json: { productID: line.productID, quantity, inventoryRecordId: line.inventoryRecordId },
+      })
     );
   }
 
-  // Uploads a CSV to the cart. The upload page only reports failures via
-  // client-side scripts, so the result is verified against the cart itself:
-  // returns { success, requested, missing } where missing lists part numbers
-  // that did not end up in the cart.
-  async uploadCartCsvContent(csvData, fileName = "upload.csv") {
-    await this._withAuthRetry(async () => {
-      const formToken = await this._getAntiForgeryToken();
-      const formData = new FormData();
-      formData.append("__RequestVerificationToken", formToken);
-      formData.append("CSVFile", new Blob([csvData], { type: "application/vnd.ms-excel" }), fileName);
-
-      const response = await this._fetch("https://www.nhpnz.co.nz/accountmanagement/shoppingcartupload", {
-        method: "POST",
-        headers: {
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Upgrade-Insecure-Requests": "1",
-          "Referer": "https://www.nhpnz.co.nz/accountmanagement/shoppingcartupload",
-        },
-        body: formData,
-      });
-
-      this._assertAuthenticated(response);
-      const responseText = await response.text();
-      if (!response.ok) {
-        throw new NHPAPIError(`Upload Cart CSV API returned status ${response.status}`, response.status, responseText);
-      }
-    });
-
-    const requested = parseCsvText(csvData);
-    const requestedIds = requested.map((p) => p.itemId);
-    let missing = await this._findMissingInCart(requestedIds);
-    if (missing.length > 0) {
-      // The upload may still be processing; NHP is slow. Check once more.
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      missing = await this._findMissingInCart(missing);
-    }
-
-    // The upload endpoint silently drops lines it can't fulfil from stock
-    // (e.g. backorder-only parts), so retry stragglers individually via
-    // AddCartLine, which supports backorders and reports real reasons.
-    const warnings = [];
-    if (missing.length > 0) {
-      for (const pn of missing) {
-        const item = requested.find((p) => p.itemId.toLowerCase() === pn.toLowerCase());
-        try {
-          const result = await this.addToCart(pn, item?.qty ?? 1);
-          for (const w of result?.Warnings || []) warnings.push(w);
-          for (const e of result?.Errors || []) warnings.push(e);
-        } catch (err) {
-          warnings.push(`${pn}: ${err.message}`);
-        }
-      }
-      missing = await this._findMissingInCart(missing);
-    }
-
-    return { success: missing.length === 0, requested: requestedIds, missing, Warnings: warnings };
+  removeCartLine(lineId) {
+    return this._withAuthRetry(() =>
+      this._api("Cart Remove", "DELETE", `/api/v1/commerce/cart/lineitems/${encodeURIComponent(lineId)}`)
+    );
   }
 
-  async _findMissingInCart(partNumbers) {
+  // There is no single clear endpoint in the new API (the site's own "Remove
+  // all" deletes lines one by one); do the same.
+  async clearCart() {
     const cart = await this.getCart();
-    const lines = cart?.Lines || [];
-    return partNumbers.filter((pn) => !lines.some((l) => l.SKUID?.toLowerCase() === pn.toLowerCase()));
+    const lines = cart?.lineItems || [];
+    for (const line of lines) {
+      await this.removeCartLine(line.id);
+    }
+    return { cleared: lines.length };
+  }
+
+  // CSV upload, rebuilt on the batch-add endpoint (the old HTML upload form
+  // is gone). Returns the same { success, requested, missing, Warnings }
+  // contract the CLI always had; `missing` lists part numbers the portal
+  // rejected, with its reasons in Warnings.
+  async uploadCartCsvContent(csvData) {
+    const requested = parseCsvText(csvData);
+    const result = await this.addToCartBatch(requested);
+    const requestedIds = requested.map((p) => String(p.itemId).toUpperCase());
+    const missing = (result.errors || []).map((e) => String(e.productID).toUpperCase());
+    const warnings = (result.errors || []).map((e) => `${e.productID}: ${e.message}`);
+    return { success: missing.length === 0, requested: requestedIds, missing, Warnings: warnings };
   }
 
   async uploadCartCsv(csvFilePath) {
     const csvData = await Deno.readTextFile(csvFilePath);
-    // The upload endpoint silently rejects anything but the exact
-    // "Part Number,Quantity" format, so normalize whatever we were given
-    // (single-column lists, quoted fields, missing header).
-    const items = parseCsvText(csvData);
-    let normalized = "Part Number,Quantity\r\n";
-    for (const item of items) {
-      normalized += `${item.itemId},${item.qty}\r\n`;
-    }
-    const fileName = csvFilePath.split(/[/\\]/).pop();
-    return await this.uploadCartCsvContent(normalized, fileName);
+    return await this.uploadCartCsvContent(csvData);
   }
 }

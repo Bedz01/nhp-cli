@@ -1,6 +1,6 @@
 {
   "name": "nhp-cli",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "exports": "./mod.js",
   "tasks": {
     "cli": "deno run -A nhp_cli.js",

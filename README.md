@@ -62,9 +62,10 @@ nhp login
 ```
 
 It asks for your portal username and password (the password is not echoed),
-logs in, and remembers both so later commands - and the frequent re-logins
-the portal's short sessions force - happen silently. Any command run before
-that will ask the same questions itself if it is running in a terminal.
+logs in, and remembers both so later commands - and the re-login needed when
+the portal's 48-hour session expires - happen silently. Any command run
+before that will ask the same questions itself if it is running in a
+terminal.
 `nhp login --reset` asks again (to change accounts); `nhp logout` forgets
 the session and the saved credentials.
 
@@ -129,26 +130,30 @@ Run `nhp help` (or `nhp --help`) for the full built-in reference.
 
 **Orders & Invoices**
 
-- `nhp orders [offset] [--full|--tsv]` - Get order history as a compact ledger
-  (`ORDER  PO  STATUS  DATE`, one line per order). Add `--full` for the
-  record view with totals. Optional search flags: `--dateFrom`, `--dateTo`,
-  `--purchaseNumber`, `--documentNumber`, `--orderNumber`,
-  `--customerReference`.
-- `nhp invoices [offset] [--brief|--tsv]` - Get invoice history. Accepts the same
-  optional search flags as orders. Add `--brief` for the ledger view.
-- `nhp order <orderId...> [--full|--tsv]` - Line items for one or more orders as a
-  ledger, one line per item: `PART  DESCRIPTION  DLV/ORD  STATUS`
-  (description truncated to fit, delivered/ordered quantity coloured
-  green/yellow/red). Several order IDs are fetched one at a time (each is a
-  full page scrape) and print one ledger each, separated by a blank line and
-  led by `Order | PO | Ref | Date`; an order that can't be fetched is reported
-  on stderr without stopping the others, and the command still exits non-zero.
-  With several IDs, `--json` emits an array with one entry per argument (a
-  failure becoming `{ orderId, error }`); a single ID keeps the bare scrape
-  result. Add `--full` for the record view with header, addresses, prices and
-  totals.
-- `nhp invoice <id> [--brief|--tsv]` - Get detailed line items for a specific invoice.
-  `--brief` prints `PART  DESCRIPTION  QTY`.
+- `nhp orders [page] [--full|--tsv]` - Get order history as a compact ledger
+  (`ORDER  PO  STATUS  DATE`, one line per order), 20 per page starting at
+  page 1. Add `--full` for the record view with totals. Optional search
+  flags: `--dateFrom`, `--dateTo` (yyyy-mm-dd), and `--purchaseNumber`,
+  `--documentNumber`, `--orderNumber`, `--customerReference` - the portal
+  has a single free-text search box, so the latter four all feed the same
+  match.
+- `nhp invoices [page] [--brief|--tsv]` - Get invoice history. Accepts the same
+  optional search flags as orders. Add `--brief` for the ledger view
+  (`INVOICE  ORDER  PO  DATE` - the order column links each invoice to the
+  sales order it came from).
+- `nhp order <orderId...> [--full|--tsv]` - Line items for one or more orders
+  (e.g. `SOR1314816`) as a ledger, one line per item: `PART  DESCRIPTION
+  DLV/ORD  STATUS` (description truncated to fit, delivered/ordered quantity
+  coloured green/yellow/red, the status carrying the portal's delivery
+  estimate). Several order IDs print one ledger each, separated by a blank
+  line and led by `Order | PO | Ref | Date`; an order that can't be fetched
+  is reported on stderr without stopping the others, and the command still
+  exits non-zero. With several IDs, `--json` emits an array with one entry
+  per argument (a failure becoming `{ orderId, error }`); a single ID keeps
+  the bare API response. Add `--full` for the record view with header,
+  addresses, prices and totals.
+- `nhp invoice <id> [--brief|--tsv]` - Get detailed line items for a specific
+  invoice (e.g. `SIN02755715`). `--brief` prints `PART  DESCRIPTION  QTY`.
 - `nhp po <query>` - Search order history by PO Number. A single match
   auto-expands like `nhp order` (ledger, or record view with `--full`).
 
@@ -165,9 +170,9 @@ Run `nhp help` (or `nhp --help`) for the full built-in reference.
   interpretations are possible.
 - `nhp cart update <partNumber|line#> <qty>` - Update the quantity of a cart item.
 - `nhp cart clear` - Empty the entire cart.
-- `nhp cart upload <csvFilePath>` - Upload a CSV of part numbers to the cart
-  (same format as `nhp csv`). The tool verifies every part actually landed in
-  the cart and reports any that were rejected.
+- `nhp cart upload <csvFilePath>` - Add a CSV of part numbers to the cart
+  (same format as `nhp csv`). Parts the portal rejects are reported
+  individually with its reason, and the command exits non-zero.
 
 **Authentication**
 
@@ -184,8 +189,7 @@ Run `nhp help` (or `nhp --help`) for the full built-in reference.
 for `order`/`invoice`, across every order given), with the order- or
 invoice-level fields repeated on each row so the result is a flat table.
 Plain text only - no colour, glyphs, truncation, or progress line; money and
-quantities are bare numbers parsed out of the portal's `$1,234.56` strings -
-so it pastes straight into columns:
+quantities are bare numbers - so it pastes straight into columns:
 
 ```powershell
 nhp order SOR1000001 SOR1000002 --tsv | Set-Clipboard        # then paste into Excel/Sheets
@@ -204,12 +208,12 @@ invoice     INVOICE  PO  REF  DATE  LINE  PART  DESCRIPTION  QTY  UNIT PRICE  TO
 ```
 
 `STOCK` is the NZ on-hand quantity and `STOCK STATUS` the badge text; `LIST`
-is always blank (the portal has no list price) and `CURRENCY` always `NZD`;
-`SELL` is filled only when `sellMarginMultiplier` is configured; `LINE` is the
-1-based position (the portal has no line numbers). Dates are `dd/mm/yyyy` as
-in every other view. Failures behave as in the human view (stderr, non-zero
-exit) and contribute no rows. `--tsv` wins over `--full`/`--brief`, `--json`
-wins over both.
+is the undiscounted price from the part's price break and `CURRENCY` always
+`NZD`; `SELL` is filled only when `sellMarginMultiplier` is configured;
+`LINE` is the portal's own line number. Dates are `dd/mm/yyyy` as in every
+other view. Failures behave as in the human view (stderr, non-zero exit) and
+contribute no rows. `--tsv` wins over `--full`/`--brief`, `--json` wins over
+both.
 
 ### JSON Output & Exit Codes
 
@@ -218,7 +222,7 @@ stdout instead of the formatted terminal output. Progress and error messages go
 to stderr, so stdout stays valid JSON for piping:
 
 ```bash
-nhp orders 0 --purchaseNumber PO-12345 --json > orders.json
+nhp orders 1 --purchaseNumber PO-12345 --json > orders.json
 ```
 
 Failed operations (unknown part numbers on `cart add`, items not found, API
@@ -226,14 +230,37 @@ errors) exit with a non-zero status code, so the CLI is safe to script against.
 
 ### Portal Quirks
 
-- **Header labels differ between the order and invoice pages, including
-  capitalisation.** The order page says `Order Created on` and `Customer
-  Reference no`; the invoice page says `Invoice date` (lower-case d) and the
-  same `Customer Reference no`. The ledger summary line and the `--tsv`
-  exports look the labels up through one shared fallback list in
-  `formatters.js`; add new spellings there, not at the call sites.
-- **Portal dates are unpadded `d/M/yyyy`** (`3/09/2026`, day first). Every
-  printed date goes through `formatDate`, which zero-pads to `dd/mm/yyyy`.
+The portal was rebuilt in September 2026 (Next.js over a REST API at
+`/api/v1/`); these are the undocumented behaviours of the new backend:
+
+- **Login is Microsoft Entra native auth, proxied through the portal.** The
+  flow is preflight → initiate → challenge → token against
+  `/api/v1/auth/oauth2/v2.0/*`; the token response sets the `__Host-sid`
+  session cookie (48 h), and that cookie alone authenticates every data
+  call - there are no anti-forgery tokens and the OAuth tokens themselves
+  are never needed. If the challenge step asks for anything but `password`
+  (e.g. an emailed code), the CLI cannot answer it and says so.
+- **The order-detail endpoint rejects the order list's own ids.**
+  `GET /orders/{id}` wants the bare sales order number (`SOR1314816`); the
+  composite `id` the list returns (`NZ-20198-SOR1314816`) gets a 404. The
+  client strips the prefix (`normalizeOrderId`). Invoices are the same
+  story: `GET /invoices/{id}/line-items` wants the invoice number
+  (`SIN02755715`), not the GUID `id` field from the invoice list.
+- **Line items carry two prices.** `unitPrice` is the list price;
+  `netPrice` is the account's actual price, and `lineAmount` is
+  `netPrice × qty`. Everything printed as a price uses `netPrice`.
+- **Invoice `status` is a bare code** (every invoice so far says `"3"`); the
+  portal itself does not display it anywhere, so this tool doesn't either.
+  The invoice ledger shows the related order number in that column instead,
+  the `--tsv` STATUS cell stays blank, and `--json` still carries the raw
+  code.
+- **Batch endpoints cap at 20 ids per request** (`products/batch`,
+  `availability`, `cart/lineitems/batch`); the client chunks transparently.
+- **There is no clear-cart endpoint.** The site's own "Remove all" deletes
+  lines one at a time; `cart clear` does the same.
+- **Dates are ISO timestamps**, except line statuses, which embed unpadded
+  `d/M/yyyy` inside text like `Est. Delivery: 22/09/2026`. Every printed
+  date goes through `formatDate`, which normalises both to `dd/mm/yyyy`.
 
 ---
 
@@ -265,7 +292,7 @@ const client = new NHPClient({
     username: "your_email@example.com",
     password: "your_password",
   },
-  timeoutMs: 120000, // Per-request timeout (default 120s - the NHP portal is slow)
+  timeoutMs: 30000, // Per-request timeout (default 30s)
   silent: true, // Set to true to suppress internal console log messages
 });
 
@@ -295,89 +322,94 @@ console.log(results.widgets[0].content); // Array of products
 
 #### `getPriceAndStock(products)`
 
-Fetches the current pricing and stock availability (including local NZ and AU
-stock). Expects an array of objects containing `itemId` (the part number) and
-`qty`.
+Fetches product records and stock availability in parallel and stitches them
+per requested item. Expects an array of objects containing `itemId` (the part
+number) and `qty`. An unknown part keeps its entry with `error` set instead
+of throwing, so results always line up with the request.
 
 ```javascript
 const items = [
   { itemId: "TPHS25R5GM", qty: 1 },
   { itemId: "1756BA1", qty: 5 },
 ];
-const pricingData = await client.getPriceAndStock(items);
+const pricing = await client.getPriceAndStock(items);
 
-// Example response mapping:
-for (const prod of pricingData.ChildProducts) {
-  if (prod.HasError || prod.ProductExist === false) {
-    // Unknown part - the reason is in prod.ErrorMessages
-    continue;
-  }
-  console.log(`Buy Price: ${prod.AdjustedPriceWithCurrency}`);
-  console.log(`NZ Stock: ${prod.OnHandQty}`);
+for (const entry of pricing.products) {
+  if (entry.error) continue; // Unknown part - the portal's reason is in entry.error
+  const brk = entry.product.priceBreaks[0];
+  console.log(`Buy: ${brk.discountedPrice}  List: ${brk.price}`);
+  const nz = entry.availability.stockQuantities.find((s) => s.type === "national");
+  console.log(`NZ Stock: ${nz?.quantity ?? 0}`);
 }
 ```
 
-#### `getOrders(pageSize, offset, options)`
+`getProducts(itemIds)` and `getAvailability(itemIds)` expose the two halves
+individually.
 
-Fetches the user's order history. The `options` object can include any
-combination of the following search filters: `documentNumber`, `orderNumber`,
-`purchaseNumber`, `customerReference`, `dateFrom`, `dateTo`.
+#### `getOrders(pageSize, page, options)`
+
+Fetches the user's order history (pages are 1-based). Responses are
+`{ items, meta }` with `meta` carrying `page`, `totalPages` and `totalCount`.
+The `options` object takes `dateFrom`/`dateTo` (yyyy-mm-dd) and a free-text
+`search` (`purchaseNumber`, `documentNumber`, `orderNumber` and
+`customerReference` are accepted as aliases - the portal has one search box).
 
 ```javascript
-// Get first 20 orders
-const orders = await client.getOrders(20, 0);
+// Get the first 20 orders
+const orders = await client.getOrders(20, 1);
 
-// Search for a specific Purchase Order number and Date Range
-const poOrders = await client.getOrders(20, 0, {
+// Search for a specific Purchase Order number and date range
+const poOrders = await client.getOrders(20, 1, {
   purchaseNumber: "PO-12345",
-  dateFrom: "01/12/2025",
-  dateTo: "06/12/2025",
+  dateFrom: "2025-12-01",
+  dateTo: "2025-12-06",
 });
 ```
 
-#### `getInvoices(pageSize, offset, options)`
+#### `getInvoices(pageSize, page, options)`
 
-Fetches the user's invoice history. The `options` object accepts the same search
-filters as `getOrders`.
+Fetches the user's invoice history. The `options` object accepts the same
+search filters as `getOrders`. `getBackorders(pageSize, page)` lists open
+backorder lines the same way.
 
 ```javascript
-const invoices = await client.getInvoices(20, 0, { dateFrom: "01/01/2026" });
+const invoices = await client.getInvoices(20, 1, { dateFrom: "2026-01-01" });
 ```
 
 #### `getOrderDetails(orderId)`
 
-Fetches specific line items and shipping statuses for a given order ID.
+Fetches the order header and line items (with shipping status and delivery
+estimates) for a sales order number. The composite ids the order list
+returns are accepted and normalised.
 
 ```javascript
-const details = await client.getOrderDetails("ORDER_ID_HERE");
-console.log(details);
+const details = await client.getOrderDetails("SOR1314816");
+console.log(details.lineItems);
 ```
 
 #### `getInvoiceDetails(invoiceId)`
 
-Fetches specific line items and pricing for a given invoice ID (Document
-Number).
+Fetches `{ header, lineItems }` for an invoice number.
 
 ```javascript
-const items = await client.getInvoiceDetails("SIN987654321");
-console.log(items);
+const { header, lineItems } = await client.getInvoiceDetails("SIN02755715");
 ```
 
 #### Cart Management
 
-The library provides complete functionality to manage the user's shopping cart:
+The library provides complete functionality to manage the user's shopping
+cart. Mutations respond with the updated cart state.
 
 ```javascript
 await client.addToCart("115797", 2);
-const cart = await client.getCart();
-await client.updateCartLineQuantity(cart.Lines[0].ExternalCartLineId, 5);
-await client.removeCartLine(cart.Lines[0].ExternalCartLineId);
+const cart = await client.getCart(); // { cart, lineItems, miniCart, messages }
+await client.updateCartLineQuantity(cart.lineItems[0], 5);
+await client.removeCartLine(cart.lineItems[0].id);
 await client.clearCart();
 
-// CSV uploads verify the result against the cart, since the NHP upload
-// endpoint does not report failures in its response:
+// Bulk adds report per-item outcomes:
 const result = await client.uploadCartCsv("./bulk_order.csv");
-// -> { success: boolean, requested: string[], missing: string[] }
+// -> { success: boolean, requested: string[], missing: string[], Warnings: string[] }
 ```
 
 ## Development

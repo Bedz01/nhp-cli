@@ -1,36 +1,42 @@
 {
-  "ChildProducts": [
+  "products": [
     {
-      "ProductId": "PGT8710",
-      "DisplayName": null,
-      "DCOnHandQty": 0,
-      "OnHandQty": 0,
-      "AdjustedPriceWithCurrency": null,
-      "StockStatusName": null,
-      "HasError": true,
-      "ErrorMessages": [
-        "Item not recognised. Please contact us via sales@nhp-nz.com or call 0800 647 647"
-      ],
-      "Discount": null,
-      "CanAddToCart": false,
-      "ProductExist": false
+      "itemId": "PGT8710",
+      "qty": 2,
+      "product": null,
+      "availability": null,
+      "error": "OrderCloud: product not found or not visible to this buyer (catalog / assignment)."
     },
     {
-      "ProductId": "P160F23100TM",
-      "DisplayName": "TemBreak PRO 160AF",
-      "Description": "Terasaki TemBreak PRO MCCB 160 Frame 36kA 3P 100A Adj. Therm. Adj. Mag.",
-      "DCOnHandQty": 125,
-      "OnHandQty": 6,
-      "AdjustedPriceWithCurrency": "$100.00",
-      "StockStatusName": "In-Stock",
-      "HasError": false,
-      "ErrorMessages": null,
-      "Discount": "Discount 40.00%",
-      "CanAddToCart": true,
-      "ProductExist": true
+      "itemId": "P160F23100TM",
+      "qty": 1,
+      "product": {
+        "id": "P160F23100TM",
+        "name": "TBP MCCB 160 FRAME 36kA 3P 100A ADJ THERM ADJ MAG",
+        "active": true,
+        "priceBreaks": [
+          { "price": 300, "quantity": 1, "salePrice": null, "discountedPrice": 100, "discountPercent": null }
+        ],
+        "displayName": "Terasaki TemBreak PRO MCCB 160 Frame 36kA 3P 100A Adj. Therm. Adj. Mag.",
+        "brand": "Terasaki",
+        "minOrderQuantity": "1",
+        "maxOrderQuantity": "10000",
+        "multiple": "1",
+        "unitOfMeasure": "EA",
+        "stockStatus": "In",
+        "stockQuantities": [],
+        "blockAddToCart": false
+      },
+      "availability": {
+        "productId": "P160F23100TM",
+        "productMessages": [],
+        "blockAddToCart": false,
+        "stockQuantities": [
+          { "quantity": 6, "location": "New Zealand", "type": "national" },
+          { "quantity": 8, "location": "Melbourne (Laverton) Warehouse", "type": "warehouse" }
+        ]
+      },
+      "error": null
     }
-  ],
-  "Success": true,
-  "Errors": [],
-  "Warnings": []
+  ]
 }
